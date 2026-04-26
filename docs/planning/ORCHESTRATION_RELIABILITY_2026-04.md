@@ -1,9 +1,9 @@
 # Orchestration & Multi-Agent Reliability Plan
 
-**Date:** 2026-04-13 (revised 2026-04-20)
+**Date:** 2026-04-13 (revised 2026-04-20, 2026-04-26)
 **Status:** Proposed sequencing for execution-time orchestration, event subscriptions, and multi-agent reliability.
 
-**Progress:** Sprint A — **7/7 complete**. Sprint B — **1/1 complete**. Sprint C — **3/5 complete**: #260 (PR #316), #271 (PR #332), #264 (PR #334). **#294 closed** (pause rationale vindicated — see Sprint C row). **#291 now unblocked** (was pending #430; #430 now shipped). Sprint D — **2/4 complete: #306 + #430 shipped.** **Next: #428 (CAPACITY-CONSOLIDATE) after 2-week soak on #306.**
+**Progress:** Sprint A — **7/7 complete**. Sprint B — **1/1 complete**. Sprint C — **5/5 complete**: #260 (PR #316), #271 (PR #332), #264 (PR #334), #291 (PR #484). **#294 closed** without implementation (pause rationale vindicated — see Sprint C row). Sprint D — **2/4 complete: #306 + #430 shipped.** **Next: #428 (CAPACITY-CONSOLIDATE) after 2-week soak on #306, plus Tier 2.6 hardening (#524/#525/#526) in parallel.**
 
 **2026-04-20 revision:** After reviewing the accumulated orchestration surface (three queue abstractions, nine cleanup paths, twelve status-column writers, seven dispatch sites), the next priority shifted from finishing Sprint C to **push-based completion (#306) + consolidation** — see *Tier 2.5 — Simplification* below. The cleanup pyramid is load-bearing, so simplification is **additive-first**: new paths ship alongside old ones and the watchdog is retired only after push has soaked.
 
@@ -26,7 +26,7 @@ Shipping #260 on top of today's foundation would produce a *persistent* backlog 
 ```
 Sprint A (unblock):     #95 ✅, #285 ✅, #226 ✅, #286 ✅, #61 ✅, #132 ✅, #56 ✅  ← COMPLETE
 Sprint B (trace):       #305 ✅  ← COMPLETE
-Sprint C (orchestrate): #260 ✅ → #271 ✅ → #264 ✅ → [#294 PAUSED] → [#291 PAUSED]
+Sprint C (orchestrate): #260 ✅ → #271 ✅ → #264 ✅ → #294 🚫 → #291 ✅
 Sprint D (simplify):    #306 ✅ → #428 (CAPACITY-CONSOLIDATE) → #429 (CLEANUP-COLLAPSE)
                         #430 ✅ (parallel — process engine deleted; archive on branch archive/process-engine)
                         (and #408 dissolves once #428 lands — verified 2026-04-24: long-running call still present, #306 alone insufficient)
@@ -163,7 +163,7 @@ If both fit cleanly on a postcard, the model is sound and Phase 2 proceeds. If e
 | ~~#271~~ ✅ | ~~Retry mechanism for scheduled executions~~ | **Shipped** in PR #332. Configurable `max_retries` (0-5, default 1) and `retry_delay_seconds` (30-600, default 60). Rate-limited (429) failures use 2x delay. Retries persist to DB and survive scheduler restart via `_recover_pending_retries()`. New status: `pending_retry`. |
 | ~~#294~~ 🚫 | ~~Business task validation (VALIDATE-001)~~ **— CLOSED** | Closed without implementation. Pause rationale held up: a second full Claude session per task is a 2x cost feature that's better subsumed by cheaper in-process primitives (output schemas, post-hoc validators). No new execution machinery shipped. |
 | ~~#264~~ ✅ | ~~Self-execute during chat (SELF-EXEC-001)~~ | **Shipped** in PR #334. Detects source==target, sets `X-Self-Task` header, optionally injects result back into chat session via `inject_result` parameter. Uses backlog for overflow when at capacity. |
-| #291 | Agent webhook triggers (WEBHOOK-001) **— UNBLOCKED (2026-04-24, #430 shipped)** | External → agent dispatch. Process engine deleted (#430), so "reuse process-engine triggers" option is gone — implement as a new trigger surface that funnels through `TaskExecutionService`. |
+| ~~#291~~ ✅ | ~~Agent webhook triggers (WEBHOOK-001)~~ | **Shipped** in PR #484 (2026-04-25; follow-up fix PR #493). New `routers/webhooks.py` exposes `POST /api/webhooks/{webhook_token}` (no JWT, rate-limited 10 calls/60s, returns 202). Per-schedule `webhook_token` (43-char `secrets.token_urlsafe(32)`) lives on `agent_schedules` with partial unique index for O(1) lookup; rotate via `POST .../webhook` (instantly invalidates old URL), revoke via DELETE. Optional `{"context": "..."}` body (≤4000 chars) wrapped in framing header before append to schedule message. All triggers audit-logged with `triggered_by="webhook"`. Funnels through the unified executor — no process-engine reuse. **Deviation from issue spec:** opaque token, not HMAC-signed URL — simpler revocation/rotation story; idempotency deferred to #525. |
 
 ### Architectural shift
 
@@ -430,7 +430,7 @@ Scheduler failure ─► _maybe_schedule_retry()  ✅ #271
                      └─ APScheduler DateTrigger → _execute_retry()
 
 New triggers, all funnel into the same executor:
-  • Webhook         ─► schedule dispatch (HMAC-signed URL)        [#291 pending]
+  • Webhook         ─► schedule dispatch (token-in-URL, rate-limited)  ✅ #291
   • Self-execute    ─► X-Self-Task, optional inject_result        ✅ #264
   • Retry           ─► new execution with retry_of_execution_id   ✅ #271
   • Validation      ─► auditor session, writes business_status    [#294 pending]
@@ -449,11 +449,11 @@ New triggers, all funnel into the same executor:
 5. ~~Confirm scope cuts for #260: FIFO-only v1, depth 50 default, 24h expiry.~~ ✅ Shipped with these cuts in PR #316.
 6. ~~Rescope #132 against `src/scheduler/service.py`~~ — ✅ Shipped in PR #328.
 7. ~~Re-estimate #56~~ — ✅ Shipped in PR #329.
-8. ~~Decide #291 direction~~ — **Paused pending #430 (PROCESS-ENGINE-DECISION).**
+8. ~~Decide #291 direction~~ — ✅ **Shipped (PR #484, 2026-04-25).** Token-in-URL trigger funnels through `TaskExecutionService`. Idempotency layer deferred to #525.
 9. ~~**Next:** Pick up #294 (validation).~~ — **Closed without implementation.**
 10. ~~**Next (2026-04-20):** Pick up **#306**~~ — ✅ **Shipped.** Soak window started on merge date; track push success rate + orphan count.
 11. ~~**Follow-up:** Create and rank the three new issues from Tier 2.5~~ — Issues #428, #429, #430 exist; rank + tier assignment tracked in the Roadmap project board (groomed 2026-04-22).
-12. ~~**Next (current):** Pick up **#428 (CAPACITY-CONSOLIDATE)** once #306 has ≥2 weeks of clean soak (zero orphan recoveries, push success ≥99.9%). In parallel, pick up **#430 (PROCESS-ENGINE-DECISION)** — no soak dependency, unblocks #291.~~ ✅ **#430 shipped (2026-04-24)**: Option B (delete) executed. Process engine archived on `archive/process-engine` branch. **Next:** pick up **#291 (WEBHOOK-001)** — now unblocked — and **#428 (CAPACITY-CONSOLIDATE)** once soak completes.
+12. ~~**Next (current):** Pick up **#428 (CAPACITY-CONSOLIDATE)** once #306 has ≥2 weeks of clean soak (zero orphan recoveries, push success ≥99.9%). In parallel, pick up **#430 (PROCESS-ENGINE-DECISION)** — no soak dependency, unblocks #291.~~ ✅ **#430 shipped (2026-04-24)**, ✅ **#291 shipped (PR #484, 2026-04-25)**. **Next:** pick up **#428 (CAPACITY-CONSOLIDATE)** once #306's 2-week soak completes (clean orphan count, push success ≥99.9%). Tier 2.6 hardening (#524/#525/#526) runs in parallel — see item 15.
 13. **Re-evaluate #408** — #306 is live, so the predicted dissolution condition now holds. Verify no long-running HTTP call remains in `TaskExecutionService` and close as dissolved (no direct code change needed).
 14. **Then:** #429 (CLEANUP-COLLAPSE) gated on #428 landing + continued clean soak — the riskiest step per §"Additive-first migration."
 15. **New (2026-04-26): Tier 2.6 hardening** — pick up **#524 (state machine contract)** as prerequisite to actually deleting cleanup phases in #429; **#525 (idempotency keys)** in parallel (most acute for webhooks #291); **#526 (dispatch circuit breaker)** parallel, sharpens further when #307 heartbeat ships. See *Tier 2.6 — Reliability hardening* and *Future considerations* sections.
