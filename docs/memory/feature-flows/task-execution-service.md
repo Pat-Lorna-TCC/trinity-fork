@@ -288,6 +288,7 @@ The service catches all errors and returns `TaskExecutionResult` with `status=Ta
 |------------|---------------|--------------|----------------|
 | Slot not acquired | `status=FAILED, error="Agent at capacity..."` | 429 | 429 |
 | Agent timeout (#61) | Terminates agent process, then `status=FAILED, error="timed out...", error_code=TIMEOUT` | 504 | 504 |
+| Agent signal-killed (#516) | Agent classifies SIGINT/SIGKILL/SIGTERM exit and returns 504 with "Execution terminated by …" detail; service treats as `status=FAILED, error=detail` (no AUTH code) | 504 | 504 |
 | Agent HTTP error | `status=FAILED, error=detail` | 503 | 502 |
 | Auth failure (#285) | `status=FAILED, error=detail, error_code=AUTH` | 503 | 503 |
 | Unexpected exception | `status=FAILED, error=str(e)` | 503 | 502 |
@@ -316,6 +317,8 @@ When subscription tokens expire, Claude Code sometimes hangs for up to an hour b
 1. **Error Code Detection** (line 415): When agent returns HTTP 503, sets `error_code=TaskExecutionErrorCode.AUTH`
 
 2. **Structured Result**: Returns `TaskExecutionResult` with `error_code=AUTH` so callers can handle auth failures specifically (e.g., prompt user to reconfigure subscription)
+
+**Signal-Kill Pre-Check (Issue #516)**: Two heuristics in the agent's auth-fallback block — string-match on the verbose transcript and "zero tokens processed" — used to fire on every external signal kill (timeout SIGKILL, OOM, parent SIGTERM, operator cancel) and surface a misleading "Subscription token may be expired" 503. Since #61 wired backend-driven `terminate_execution_on_agent()` into the timeout path, signal kills became the *common* case for any timeout. `_classify_signal_exit()` (`claude_code.py:894`) now runs *before* the auth heuristics; signal-killed exits raise HTTP 504 (not 503), so the backend's AUTH classifier at line 542 correctly skips them and they flow through to the generic FAILED path with a clear "killed by SIGKILL/SIGTERM/SIGINT — likely timeout, OOM, or operator cancel" detail. Critical when PR #508 (auth-class auto-switch) lands: prevents a misclassified timeout from triggering an unnecessary subscription rotation.
 
 **Result**: Auth failures now fast-fail in seconds instead of hanging for up to an hour.
 

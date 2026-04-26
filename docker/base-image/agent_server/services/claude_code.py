@@ -879,6 +879,59 @@ def _diagnose_exit_failure(return_code: int, metadata: Optional['ExecutionMetada
     return hints.get(return_code, f"Process exited with code {return_code}. Check agent container logs.")
 
 
+# Signals that indicate external termination of the claude subprocess
+# (timeout SIGKILL, OOM-kill, parent SIGTERM, operator cancel).
+# Python subprocess returns these as negative numbers; shell wrappers
+# may surface them as 128 + signum (130, 137, 143).
+_SIGNAL_EXIT_NAMES = {
+    2: "SIGINT",
+    9: "SIGKILL",
+    15: "SIGTERM",
+}
+_SHELL_ENCODED_SIGNAL_EXITS = {130, 137, 143}
+
+
+def _classify_signal_exit(
+    return_code: int,
+    metadata: Optional['ExecutionMetadata'] = None,
+) -> Optional[Tuple[int, str]]:
+    """Classify a non-zero subprocess exit as an external signal kill.
+
+    Issue #516: When claude is killed by SIGKILL/SIGTERM/SIGINT (schedule
+    timeout, OOM-kill, parent cancel), the subprocess never emits its final
+    `result` message and `process.wait()` returns a negative or 128+N exit
+    code. Without this classification, the downstream auth-fallback heuristic
+    misreads "zero tokens processed" as an expired subscription token and
+    surfaces a confusing "Generate a new one with claude setup-token" error
+    on every cron tick — masking the real cause (timeout/OOM/cancel).
+
+    Mirrors the #361 max-turns special-case pattern: classify *before* the
+    auth heuristics get a chance to misclassify.
+
+    Returns ``(status_code, detail)`` for signal exits, or ``None`` if the
+    return code is not a recognized signal termination (caller proceeds
+    with normal error classification).
+    """
+    if return_code < 0:
+        signum = -return_code
+    elif return_code in _SHELL_ENCODED_SIGNAL_EXITS:
+        signum = return_code - 128
+    else:
+        return None
+
+    sig_name = _SIGNAL_EXIT_NAMES.get(signum, f"signal {signum}")
+    tool_count = metadata.tool_count if metadata else 0
+    num_turns = metadata.num_turns if (metadata and metadata.num_turns) else 0
+    detail = (
+        f"Execution terminated by {sig_name} after {tool_count} tool calls "
+        f"/ {num_turns} turns (exit code {return_code}). "
+        f"Likely cause: schedule/agent timeout exceeded, OOM kill, or operator cancel. "
+        f"Increase the schedule's timeout_seconds, raise agent memory, "
+        f"or split the skill into smaller steps."
+    )
+    return (504, detail)
+
+
 def get_execution_lock():
     """Get the execution lock for chat endpoint"""
     return _execution_lock
@@ -1252,6 +1305,18 @@ async def execute_headless_task(
 
             # Check for errors
             if return_code != 0:
+                # Issue #516: Signal terminations (timeout SIGKILL, OOM, parent SIGTERM,
+                # operator cancel) must be classified before the auth heuristics, which
+                # would otherwise misread "zero tokens processed" as an expired token.
+                # Same shape as the #361 max-turns special-case above. The #61 path
+                # (backend-driven terminate_execution_on_agent → process_registry's
+                # SIGINT→SIGKILL) makes this the common case for any timeout.
+                signal_exit = _classify_signal_exit(return_code, metadata)
+                if signal_exit is not None:
+                    status_code, detail = signal_exit
+                    logger.warning(f"[Headless Task] {detail}")
+                    raise HTTPException(status_code=status_code, detail=detail)
+
                 error_preview = verbose_transcript[:500] if verbose_transcript else ""
                 if not error_preview:
                     # Try to provide a meaningful fallback based on common failure patterns
@@ -1266,9 +1331,11 @@ async def execute_headless_task(
                         detail=f"Authentication failure: {error_preview[:300]}. Check subscription token or API key configuration."
                     )
 
-                # Issue #285: Heuristic fallback — if exit code != 0 AND zero tokens processed,
-                # likely an auth failure even if we didn't see the exact pattern
-                if metadata.input_tokens == 0 and metadata.output_tokens == 0:
+                # Issue #285: Heuristic fallback — if exit code > 0 AND zero tokens processed,
+                # likely an auth failure even if we didn't see the exact pattern.
+                # Issue #516: require return_code > 0 — signal exits are handled above and
+                # would otherwise produce a false positive here (zero tokens after kill).
+                if return_code > 0 and metadata.input_tokens == 0 and metadata.output_tokens == 0:
                     logger.warning(
                         f"[Headless Task] Zero tokens processed with exit code {return_code} — "
                         f"likely auth failure. Stderr: {error_preview[:200]}"
