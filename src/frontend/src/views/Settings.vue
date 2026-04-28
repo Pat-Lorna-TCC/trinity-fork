@@ -152,6 +152,18 @@
                       </svg>
                       Save
                     </button>
+                    <button
+                      v-if="anthropicKeyStatus.configured && anthropicKeyStatus.source === 'settings'"
+                      @click="removeAnthropicKey"
+                      :disabled="removingApiKey"
+                      class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-700 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg v-if="removingApiKey" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Remove
+                    </button>
                   </div>
                   <!-- Status/Result -->
                   <div class="mt-2 flex items-center text-sm">
@@ -244,6 +256,18 @@
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
                       Save
+                    </button>
+                    <button
+                      v-if="githubPatStatus.configured && githubPatStatus.source === 'settings'"
+                      @click="removeGithubPat"
+                      :disabled="removingGithubPat"
+                      class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-700 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg v-if="removingGithubPat" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Remove
                     </button>
                   </div>
                   <!-- Status/Result -->
@@ -440,6 +464,18 @@
                       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                     Save Credentials
+                  </button>
+                  <button
+                    v-if="slackHasStoredCredentials"
+                    @click="removeSlackSettings"
+                    :disabled="removingSlackSettings"
+                    class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-700 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <svg v-if="removingSlackSettings" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Remove Credentials
                   </button>
                   <span v-if="slackSaveSuccess" class="text-sm text-green-600 dark:text-green-400">
                     ✓ Saved
@@ -1611,16 +1647,26 @@ Example:
         </div>
       </div>
     </main>
+
+    <ConfirmDialog
+      v-model:visible="confirmDialog.visible"
+      :title="confirmDialog.title"
+      :message="confirmDialog.message"
+      :confirm-text="confirmDialog.confirmText"
+      :variant="confirmDialog.variant"
+      @confirm="confirmDialog.onConfirm"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
 import NavBar from '../components/NavBar.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -1705,6 +1751,27 @@ const githubPatStatus = ref({
   source: null
 })
 const githubPatPropagation = ref(null)
+const removingApiKey = ref(false)
+const removingGithubPat = ref(false)
+const removingSlackSettings = ref(false)
+
+const slackHasStoredCredentials = computed(() => {
+  const s = slackSettings.value
+  return Boolean(
+    (s?.client_id?.configured && s.client_id.source === 'settings') ||
+    (s?.client_secret?.configured && s.client_secret.source === 'settings') ||
+    (s?.signing_secret?.configured && s.signing_secret.source === 'settings')
+  )
+})
+
+const confirmDialog = reactive({
+  visible: false,
+  title: '',
+  message: '',
+  confirmText: 'Confirm',
+  variant: 'danger',
+  onConfirm: () => {}
+})
 
 // Slack Integration state (SLACK-001)
 const slackClientId = ref('')
@@ -1972,6 +2039,51 @@ async function saveGithubPat() {
   }
 }
 
+function removeAnthropicKey() {
+  confirmDialog.title = 'Remove Anthropic API Key'
+  confirmDialog.message = 'Remove the stored Anthropic API key? Agents will fall back to the ANTHROPIC_API_KEY environment variable if set, otherwise they will stop working until a key is re-added.'
+  confirmDialog.confirmText = 'Remove'
+  confirmDialog.variant = 'danger'
+  confirmDialog.onConfirm = async () => {
+    removingApiKey.value = true
+    error.value = null
+    try {
+      await axios.delete('/api/settings/api-keys/anthropic')
+      await loadApiKeyStatus()
+      anthropicKey.value = ''
+      apiKeyTestResult.value = null
+    } catch (e) {
+      error.value = e.response?.data?.detail || 'Failed to remove API key'
+    } finally {
+      removingApiKey.value = false
+    }
+  }
+  confirmDialog.visible = true
+}
+
+function removeGithubPat() {
+  confirmDialog.title = 'Remove GitHub PAT'
+  confirmDialog.message = 'Remove the stored GitHub Personal Access Token? Agents will fall back to the GITHUB_PAT environment variable if set. Repository creation and push will fail until a PAT is re-added.'
+  confirmDialog.confirmText = 'Remove'
+  confirmDialog.variant = 'danger'
+  confirmDialog.onConfirm = async () => {
+    removingGithubPat.value = true
+    error.value = null
+    try {
+      await axios.delete('/api/settings/api-keys/github')
+      await loadApiKeyStatus()
+      githubPat.value = ''
+      githubPatTestResult.value = null
+      githubPatPropagation.value = null
+    } catch (e) {
+      error.value = e.response?.data?.detail || 'Failed to remove GitHub PAT'
+    } finally {
+      removingGithubPat.value = false
+    }
+  }
+  confirmDialog.visible = true
+}
+
 // Public URL methods
 async function loadPublicUrl() {
   try {
@@ -2047,6 +2159,29 @@ async function saveSlackSettings() {
   } finally {
     savingSlackSettings.value = false
   }
+}
+
+function removeSlackSettings() {
+  confirmDialog.title = 'Remove Slack Credentials'
+  confirmDialog.message = 'Remove the stored Slack OAuth credentials (client ID, client secret, signing secret)? Slack integration will fall back to environment variables if configured; otherwise Slack channels will stop working until credentials are re-added.'
+  confirmDialog.confirmText = 'Remove'
+  confirmDialog.variant = 'danger'
+  confirmDialog.onConfirm = async () => {
+    removingSlackSettings.value = true
+    error.value = null
+    try {
+      await axios.delete('/api/settings/slack')
+      await loadSlackSettings()
+      slackClientId.value = ''
+      slackClientSecret.value = ''
+      slackSigningSecret.value = ''
+    } catch (e) {
+      error.value = e.response?.data?.detail || 'Failed to remove Slack credentials'
+    } finally {
+      removingSlackSettings.value = false
+    }
+  }
+  confirmDialog.visible = true
 }
 
 async function loadSlackTransportStatus() {
