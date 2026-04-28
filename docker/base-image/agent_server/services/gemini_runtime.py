@@ -506,7 +506,8 @@ class GeminiRuntime(AgentRuntime):
         timeout_seconds: int = 900,
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
-        resume_session_id: Optional[str] = None
+        resume_session_id: Optional[str] = None,
+        images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """
         Execute Gemini CLI in headless mode for parallel tasks.

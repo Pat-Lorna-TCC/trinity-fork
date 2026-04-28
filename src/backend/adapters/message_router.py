@@ -465,8 +465,9 @@ class ChannelMessageRouter:
         # Issue #487: workspace-write failures abort execution and surface a
         # channel-native error so the user knows the upload didn't land.
         upload_dir = None  # Track for cleanup
+        image_data: list = []
         if message.files:
-            file_descriptions, upload_dir, all_writes_failed = await self._handle_file_uploads(
+            file_descriptions, upload_dir, all_writes_failed, image_data = await self._handle_file_uploads(
                 adapter, message, agent_name, container, session_id,
                 verified_email=verified_email,
             )
@@ -504,10 +505,9 @@ class ChannelMessageRouter:
         # Configurable via settings_service (default: WebSearch, WebFetch)
         public_allowed_tools = _get_channel_allowed_tools()
 
-        # If user uploaded non-image files, agent needs Read to access them.
-        # Images are excluded: Claude Code crashes when reading PNGs with
-        # --allowedTools (API returns 400 "Could not process image" and the
-        # process exits without flushing stdout, hanging the pipe reader).
+        # Non-image files land at upload_dir in the container; agent needs Read
+        # to access them. Images are delivered as vision content blocks via
+        # --input-format stream-json (#562), so no Read is needed for them.
         _IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"}
         has_readable_files = message.files and any(
             f.mimetype not in _IMAGE_MIMES for f in message.files
@@ -525,6 +525,7 @@ class ChannelMessageRouter:
                 source_user_email=source_email,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
+                images=image_data or None,
             )
 
             if result.status == "failed":
@@ -697,15 +698,16 @@ class ChannelMessageRouter:
     ) -> tuple:
         """
         Download files via adapter and either:
-        - Images: embed as base64 data URI in the prompt (Claude vision)
+        - Images: collect as base64 vision objects for stream-json delivery (#562)
         - Other files: copy into per-session dir in agent container
 
-        Returns (descriptions, upload_dir, all_writes_failed):
+        Returns (descriptions, upload_dir, all_writes_failed, image_data):
         - descriptions: list of context strings for prompt injection
         - upload_dir: container path to clean up after execution, or None
         - all_writes_failed: True iff at least one file attempted a workspace
           write but every such attempt failed; the caller should reply with
           an explicit error and skip agent execution (Issue #487 AC6).
+        - image_data: list of {"media_type": str, "data": base64_str} for vision
         """
         import base64
 
@@ -721,6 +723,7 @@ class ChannelMessageRouter:
         safe_session_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
         upload_dir = f"{UPLOAD_BASE}/{safe_session_id}"
         descriptions = []
+        image_data: list = []
         dir_created = False
         total_image_bytes = 0
         used_names: set = set()
@@ -814,22 +817,25 @@ class ChannelMessageRouter:
             size_str = _format_file_size(actual_size)
 
             if is_image:
-                # Check total inline image budget
+                # Check total image budget
                 if total_image_bytes + len(data) > MAX_TOTAL_IMAGE_SIZE:
                     logger.warning(f"[ROUTER] Skipping {safe_name}: total image budget exceeded")
                     descriptions.append(f"{safe_name} ({size_str}) — skipped (total image size limit reached)")
                     continue
 
-                # Image embedding is the "write" for vision-mode files.
+                # #562: collect as vision content block for stream-json delivery.
+                # Passing images as proper API content blocks (via --input-format
+                # stream-json) instead of base64 data URIs in text, which are
+                # invisible to the model — Claude Code passes stdin as plain text.
                 write_attempted += 1
                 total_image_bytes += len(data)
                 b64 = base64.b64encode(data).decode()
+                image_data.append({"media_type": actual_mime, "data": b64})
                 descriptions.append(
-                    f"[File uploaded by {uploader}]: {safe_name} ({size_str}) — image attached inline\n"
-                    f"![{safe_name}](data:{actual_mime};base64,{b64})"
+                    f"[File uploaded by {uploader}]: {safe_name} ({size_str}) — image provided for visual analysis"
                 )
                 write_succeeded += 1
-                logger.info(f"[ROUTER] Embedded {safe_name} ({size_str}) as base64 for {agent_name}")
+                logger.info(f"[ROUTER] Queued {safe_name} ({size_str}) as vision block for {agent_name}")
 
                 # Audit log for image upload
                 await platform_audit_service.log(
@@ -842,7 +848,7 @@ class ChannelMessageRouter:
                         "filename": safe_name,
                         "size_bytes": actual_size,
                         "mime_type": actual_mime,
-                        "storage": "inline_base64",
+                        "storage": "stream_json_vision",
                         "sender_id": message.sender_id,
                         "channel_id": message.channel_id,
                         "uploader": uploader,
@@ -915,7 +921,7 @@ class ChannelMessageRouter:
             descriptions.append(f"({len(files) - MAX_FILES} more file(s) skipped — max {MAX_FILES} per message)")
 
         all_writes_failed = write_attempted > 0 and write_succeeded == 0
-        return descriptions, upload_dir if dir_created else None, all_writes_failed
+        return descriptions, upload_dir if dir_created else None, all_writes_failed, image_data
 
 
 # Singleton instance

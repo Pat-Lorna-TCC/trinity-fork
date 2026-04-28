@@ -109,7 +109,8 @@ class AgentRuntime(ABC):
         timeout_seconds: int = 900,
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
-        resume_session_id: Optional[str] = None
+        resume_session_id: Optional[str] = None,
+        images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """
         Execute a stateless task in headless mode (no conversation context).

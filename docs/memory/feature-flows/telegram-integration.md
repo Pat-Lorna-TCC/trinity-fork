@@ -808,7 +808,7 @@ the Slack pattern).
 
 **Chat injection format** (every channel, not just Telegram):
 - Successful file: `[File uploaded by {uploader}]: {filename} ({size}) saved to {dest_path}`
-- Successful image: `[File uploaded by {uploader}]: {filename} ({size}) — image attached inline` followed by `![{name}](data:{mime};base64,…)`
+- Successful image: `[File uploaded by {uploader}]: {filename} ({size}) — image provided for visual analysis` (image delivered as vision content block — see #562)
 - Workspace write failure: `[File upload failed]: {filename} — {reason}`
 
 `{uploader}` is the verified email when `adapter.resolve_verified_email`
@@ -837,7 +837,43 @@ human-readable provenance for any file in its workspace.
 `dest_path`, `storage` (`container_file` or `inline_base64`), and
 `uploader` so the audit trail captures who uploaded what to which agent.
 
+### Phase 3: Vision Delivery via stream-json (#562)
+
+**Problem**: Images embedded as `data:` URIs in the text prompt were opaque strings — the Claude Code CLI never forwarded them to the Claude API as real image content blocks, so agents could not see the images.
+
+**Fix**: `_handle_file_uploads()` now returns image MIME/base64 dicts as a 4th element of its tuple (`image_data: list`). For image MIME types, the file is still written to the container workspace (read tool fallback), but it is also collected for vision delivery. The description changes from `"image attached inline"` to `"image provided for visual analysis"` (no `data:` URI appended).
+
+`message_router.py` passes `images=image_data or None` into `task_execution_service.execute_task()`. The service adds it to the `/api/task` HTTP payload. The agent-side `chat.py` router passes it to `runtime.execute_headless()`. In `claude_code.py`, when `images` is truthy, two changes take effect:
+
+1. `--input-format stream-json` is appended to the `claude` CLI command.
+2. `stdin` payload is a JSON message instead of plain text:
+   ```json
+   {"type": "user", "message": {"role": "user", "content": [
+     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "<b64>"}},
+     {"type": "text", "text": "<prompt>"}
+   ]}}
+   ```
+
+The `GeminiRuntime` and `AgentRuntime` ABC gained an `images` parameter (ignored by Gemini today) to prevent `TypeError` on any image task.
+
+**Stdin write ordering**: stdout/stderr reader threads are started before `process.stdin.write()` to prevent pipe deadlock when the image payload is large. The write itself runs inside the executor thread (not the async event loop) to avoid blocking.
+
+**Key files**:
+- `src/backend/adapters/message_router.py` — 4-tuple return, `images or None` passthrough
+- `src/backend/services/task_execution_service.py` — `images` param, forwarded in payload
+- `docker/base-image/agent_server/models.py` — `ParallelTaskRequest.images` field
+- `docker/base-image/agent_server/routers/chat.py` — passes `images` to `execute_headless()`
+- `docker/base-image/agent_server/services/claude_code.py` — stream-json stdin + flag
+- `docker/base-image/agent_server/services/runtime_adapter.py` — ABC signature updated
+- `docker/base-image/agent_server/services/gemini_runtime.py` — GeminiRuntime signature updated
+
 ### Tests
+
+17 unit tests in `tests/unit/test_channel_image_vision.py` (#562):
+- `TestParallelTaskRequestImages` (4 tests): model field defaults and acceptance
+- `TestStreamJsonPayload` (6 tests): payload construction for 0/1/N images
+- `TestCmdContainsInputFormat` (4 tests): `--input-format stream-json` added iff images present
+- `TestHandleFileUploadsImageReturn` (3 tests): 4-tuple return, image vs non-image MIME
 
 27 unit tests in `tests/unit/test_file_upload.py`:
 - `TestTelegramFileExtraction` (4 tests): Photo/document extraction
@@ -884,3 +920,4 @@ human-readable provenance for any file in its workspace.
 | 2026-04-16 | #354 Phase 1: Telegram file upload support. `_extract_files()` and `download_file()` in adapter. Post-download size/MIME validation in router. python-magic dependency. 11 unit tests. |
 | 2026-04-18 | #318: Voice transcription via Gemini. `process_voice()` in telegram_media.py, voice processing hook in message_router.py. Limits: 5 min duration, 10MB size. 22 unit tests. |
 | 2026-04-25 | #487 Phase 2: workspace delivery hardened. New `_sanitize_filename` helper (NFKC + basename + safe-chars + 200-char truncation + collision dedup). Chat injection format `[File uploaded by {uploader}]: {name} ({size}) saved to {path}`. All-writes-failed now replies via channel and aborts execution. Audit entries include `uploader`. 16 new tests (27 total in `test_file_upload.py`). |
+| 2026-04-28 | #562: Vision delivery fixed. Replaced broken base64 data URI text embedding with proper `--input-format stream-json` vision content blocks delivered via Claude CLI stdin. `_handle_file_uploads` returns 4-tuple with `image_data`. `GeminiRuntime` and `AgentRuntime` ABC updated to accept `images` param. 17 new tests in `test_channel_image_vision.py`. |

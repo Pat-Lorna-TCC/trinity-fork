@@ -128,7 +128,8 @@ async def execute_task(request: ParallelTaskRequest):
         timeout_seconds=request.timeout_seconds or 900,  # Default 15 minutes for research tasks
         max_turns=request.max_turns,
         execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
-        resume_session_id=request.resume_session_id  # Resume previous session (EXEC-023)
+        resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
+        images=request.images,  # Vision images from channel adapters (#562)
     )
 
     logger.info(f"[Task] Task {session_id} completed successfully")

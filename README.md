@@ -44,6 +44,8 @@
 | **Build Custom** | 6-12 months, $500K+ engineering | Deploy in minutes |
 | **Frameworks** | No observability, no fleet management | Real-time monitoring, scheduling, audit trails |
 
+> **Security**: Trinity received a **Grade A (Excellent)** in an independent web application penetration test by [UnderDefense](https://underdefense.com) (April 2026). All critical and high findings from the initial assessment were fully remediated. See the [attestation letter](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf).
+
 ---
 
 ## Getting Started — Deploy an Agent in 3 Minutes
@@ -613,6 +615,7 @@ EMAIL_PROVIDER=console  # Use 'resend' or 'smtp' for production
 - [Testing Guide](docs/TESTING_GUIDE.md) — Testing approach and standards
 - [Contributing Guide](CONTRIBUTING.md) — How to contribute (PRs, code standards)
 - [Known Issues](docs/KNOWN_ISSUES.md) — Current limitations and workarounds
+- [Security Attestation](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf) — Web pentest by UnderDefense (Apr 2026, Grade A — Excellent)
 
 ## Development
 

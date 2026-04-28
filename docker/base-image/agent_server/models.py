@@ -206,6 +206,7 @@ class ParallelTaskRequest(BaseModel):
     max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
     execution_id: Optional[str] = None  # Database execution ID (used for process registry if provided)
     resume_session_id: Optional[str] = None  # Claude Code session ID for --resume (EXEC-023)
+    images: Optional[List[Dict[str, str]]] = None  # Vision images: [{"media_type": "image/jpeg", "data": "<base64>"}]
 
 
 class ParallelTaskResponse(BaseModel):

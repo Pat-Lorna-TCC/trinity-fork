@@ -140,6 +140,7 @@ async def execute_task(
     parent_activity_id: Optional[str] = None,       # Issue #95: CHAT_START parent linkage
     extra_activity_details: Optional[dict] = None,  # Issue #95: merged into CHAT_START details
     slot_already_held: bool = False,                # Issue #95: async path pre-acquires slot upfront
+    images: Optional[list] = None,                  # #562: vision content blocks for channel images
 ) -> TaskExecutionResult:
 ```
 

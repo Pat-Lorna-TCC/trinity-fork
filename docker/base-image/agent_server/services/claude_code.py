@@ -140,16 +140,18 @@ class ClaudeCodeRuntime(AgentRuntime):
         timeout_seconds: int = 900,
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
-        resume_session_id: Optional[str] = None
+        resume_session_id: Optional[str] = None,
+        images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
         Args:
             resume_session_id: Optional session ID to resume (EXEC-023)
+            images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
         """
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
-            max_turns, execution_id, resume_session_id
+            max_turns, execution_id, resume_session_id, images=images,
         )
 
 
@@ -1016,7 +1018,8 @@ async def execute_headless_task(
     timeout_seconds: int = 900,
     max_turns: Optional[int] = None,
     execution_id: Optional[str] = None,
-    resume_session_id: Optional[str] = None
+    resume_session_id: Optional[str] = None,
+    images: Optional[List[Dict]] = None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
     Execute Claude Code in headless mode for parallel task execution.
@@ -1101,6 +1104,12 @@ async def execute_headless_task(
             cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
             logger.info(f"[Headless Task] Guardrails disallow tools: {disallowed_tools}")
 
+        # #562: when images are present, use stream-json stdin format so images
+        # are delivered as proper vision content blocks, not base64 text strings.
+        if images:
+            cmd.extend(["--input-format", "stream-json"])
+            logger.info(f"[Headless Task] {len(images)} image(s) — switching to stream-json input")
+
         # Add system prompt if specified
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
@@ -1152,10 +1161,6 @@ async def execute_headless_task(
             "message_preview": prompt[:100],
             "pgid": process_pgid,
         })
-
-        # Write prompt to stdin and close it
-        process.stdin.write(prompt)
-        process.stdin.close()
 
         # Issue #285: Event to signal auth failure detected in stderr
         # When set, stdout loop should stop and process should be killed
@@ -1263,13 +1268,45 @@ async def execute_headless_task(
                     pass
 
         def read_subprocess_output_with_timeout():
-            """Runs in thread pool. Waits for subprocess with bounded timeout,
-            then drains reader threads (killing process-group stragglers if
-            they hold pipes open — Issue #407)."""
+            """Runs in thread pool. Writes stdin, starts reader threads, and
+            waits for subprocess with bounded timeout, then drains reader
+            threads (killing process-group stragglers if they hold pipes
+            open — Issue #407).
+
+            Stdin is written here (not in the async coroutine) so that:
+            1. Large payloads (e.g. base64 images) do not block the event loop.
+            2. Reader threads are active before the write, preventing pipe-
+               buffer deadlock if claude writes stdout before stdin is closed.
+            """
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
             stdout_thread = threading.Thread(target=_run_stdout, daemon=True)
             stderr_thread.start()
             stdout_thread.start()
+
+            # Build and write stdin payload. For vision tasks use stream-json
+            # format so images arrive as proper content blocks (#562).
+            if images:
+                content_blocks: List[Dict] = [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["media_type"],
+                            "data": img["data"],
+                        },
+                    }
+                    for img in images
+                ]
+                content_blocks.append({"type": "text", "text": prompt})
+                stdin_payload = (
+                    json.dumps({"type": "user", "message": {"role": "user", "content": content_blocks}})
+                    + "\n"
+                )
+            else:
+                stdin_payload = prompt
+
+            process.stdin.write(stdin_payload)
+            process.stdin.close()
 
             # Bounded wait on the subprocess itself. If claude hangs, we
             # never wedge the executor thread for more than timeout_seconds.

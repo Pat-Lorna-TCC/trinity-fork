@@ -246,6 +246,7 @@ class TaskExecutionService:
         slot_already_held: bool = False,
         schedule_context: Optional[dict] = None,
         attempt: Optional[int] = None,
+        images: Optional[list] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -415,6 +416,7 @@ class TaskExecutionService:
                 "timeout_seconds": timeout_seconds,
                 "execution_id": execution_id,
                 "resume_session_id": resume_session_id,
+                "images": images or None,
             }
 
             effective_timeout = float(timeout_seconds or 600) + 10
