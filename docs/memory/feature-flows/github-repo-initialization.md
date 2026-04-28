@@ -460,12 +460,19 @@ async def initialize_git_in_container(
     git_dir = "/home/developer/workspace" if workspace_has_content else "/home/developer"
 
     # Step 2: Append any missing _GITIGNORE_PATTERNS entries to .gitignore
-    # (issue #458). Runs for BOTH /home/developer and the legacy
+    # (issues #458 and #462). Runs for BOTH /home/developer and the legacy
     # /home/developer/workspace path. The merge is idempotent — each
     # pattern is gated by an exact-line `grep -qxF` check — so any
     # workspace-supplied `.gitignore` (e.g. written by `/trinity:onboard`)
-    # is preserved. Patterns: .bash_logout, .bashrc, .profile,
-    # .bash_history, .cache/, .local/, .npm/, .ssh/, .env, .env.*, .mcp.json.
+    # is preserved.
+    #
+    # _GITIGNORE_PATTERNS is the canonical exclusion list (single source
+    # of truth) — see src/backend/services/git_service.py and the mirrored
+    # block in docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md. The list covers
+    # shell init, credentials, instance-specific dirs/files, Claude Code
+    # runtime data, temp files, and local overrides. The same merge runs
+    # again on every Push via _migrate_workspace_gitignore (#462) so
+    # existing agents pick up new entries without re-init.
     execute_command_in_container(
         command=_build_gitignore_merge_command(git_dir),
         timeout=5,
@@ -1098,8 +1105,14 @@ sqlite3 ~/trinity-data/trinity.db "SELECT key, substr(value, 1, 10) || '...' FRO
 # - Two branches: main, trinity/test-agent/xxxxxxxx
 # - Commits on both branches
 # - Agent files: CLAUDE.md, .claude/, .trinity/
-# - .gitignore excludes: .bashrc, .cache/, .ssh/, .env, .env.*, .mcp.json
-# - .env and .mcp.json are NOT in the initial commit (#458)
+# - .gitignore covers the full _GITIGNORE_PATTERNS list — see the canonical
+#   constant in src/backend/services/git_service.py (also mirrored in
+#   docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md). The list spans shell init,
+#   credentials, instance-specific dirs/files, Claude Code runtime data,
+#   temp files, and local overrides.
+# - .env, .mcp.json, and Claude Code runtime files (.claude/sessions,
+#   .claude/shell-snapshots, .cache, .claude.json, etc.) are NOT in the
+#   initial commit (#458 + #462)
 ```
 
 **Verify in Database**:
@@ -1180,15 +1193,18 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 **Expected**:
 - System uses `/home/developer` directly (no workspace subdirectory)
 - Backend logs: `Using home directory: /home/developer`
-- `.gitignore` contains system file exclusions plus `.env`, `.env.*`, `.mcp.json` (#458)
-- Agent files (CLAUDE.md, .claude/, .trinity/) pushed to GitHub
+- `.gitignore` contains the full `_GITIGNORE_PATTERNS` canonical list — credentials, instance dirs/files, Claude Code runtime data, temp files (#458 + #462)
+- Agent files (CLAUDE.md, .claude/commands/, .claude/skills/, .claude/agents/, .trinity/) pushed to GitHub
 - `.env` and `.mcp.json` written by `inject_credentials` are excluded
+- Claude Code runtime (`.claude/sessions/`, `.claude/shell-snapshots/`, `.claude.json`, etc.) is excluded
 - Pre-existing workspace `.gitignore` rules (e.g. from `/trinity:onboard`) are preserved
+- The same merge runs on every subsequent Push via `_migrate_workspace_gitignore` (#462), so existing agents pick up new patterns automatically
 
 **LEGACY Case** (agents created before 2026-02):
 - If `/home/developer/workspace/` exists with content, that directory is used
 - Backend logs: `Using workspace directory: /home/developer/workspace`
 - `.gitignore` merge also runs here (#458 — previously skipped)
+- Detection logic shared with `_detect_git_dir`, used by both init and the post-init Push migration (#462)
 
 **Verify**:
 - Check GitHub repo contains agent files but not system files

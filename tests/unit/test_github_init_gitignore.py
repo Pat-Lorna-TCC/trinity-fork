@@ -105,3 +105,159 @@ def test_fresh_agent_ignores_env_and_mcp_json(tmp_path):
         assert p in lines, (
             f"pattern {p!r} not in .gitignore after fresh merge — got:\n{content}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #462 regression coverage — the platform-injected `.gitignore` must cover the
+# full canonical list and existing agents must migrate on the next Push.
+# ---------------------------------------------------------------------------
+
+
+def test_full_documented_exclusion_list_present(tmp_path):
+    """Every entry in `_GITIGNORE_PATTERNS` must end up in `.gitignore`
+    after a fresh merge. Guards against accidental constant truncation.
+    """
+    gs = _load_git_service()
+    content = _run_merge(tmp_path)
+    lines = content.splitlines()
+
+    for pattern in gs._GITIGNORE_PATTERNS:
+        assert pattern in lines, (
+            f"pattern {pattern!r} from _GITIGNORE_PATTERNS missing — got:\n"
+            f"{content}"
+        )
+
+
+def test_idempotent_double_run(tmp_path):
+    """Running the merge twice must not duplicate any line. The append guard
+    is `grep -qxF` per pattern; a regression here would mean every Push
+    grows the file by one full copy of the canonical list.
+    """
+    _run_merge(tmp_path)
+    second = _run_merge(tmp_path)
+    lines = second.splitlines()
+
+    # Each pattern must appear exactly once.
+    gs = _load_git_service()
+    for pattern in gs._GITIGNORE_PATTERNS:
+        count = lines.count(pattern)
+        assert count == 1, (
+            f"pattern {pattern!r} appears {count} times after double run — "
+            f"merge is not idempotent. Full file:\n{second}"
+        )
+
+
+def test_doc_and_constant_in_sync():
+    """The `.gitignore` code block in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
+    must contain every entry in `_GITIGNORE_PATTERNS`.
+
+    The Python constant is the source of truth. The doc is hand-written and
+    drifts; this test catches drift in CI before the doc gets out of date
+    again. A new entry in `_GITIGNORE_PATTERNS` requires a matching update
+    to the doc block (see `### 5. .gitignore (Required)` section).
+    """
+    import re
+    gs = _load_git_service()
+
+    doc_path = _project_root / "docs" / "TRINITY_COMPATIBLE_AGENT_GUIDE.md"
+    doc = doc_path.read_text()
+
+    # Find the first ```gitignore ... ``` fenced block in the file.
+    match = re.search(r"```gitignore\n(.*?)\n```", doc, flags=re.DOTALL)
+    assert match, (
+        f"no ```gitignore``` code block found in {doc_path} — did the "
+        "section get renamed or the fence language change?"
+    )
+    doc_lines = set(match.group(1).splitlines())
+
+    missing = [p for p in gs._GITIGNORE_PATTERNS if p not in doc_lines]
+    assert not missing, (
+        f"_GITIGNORE_PATTERNS entries missing from doc block: {missing}. "
+        f"Update the gitignore code block in {doc_path.name} to match "
+        "git_service.py — they are intentionally kept in sync."
+    )
+
+
+def test_rm_cached_for_newly_ignored_files(tmp_path):
+    """A file that was committed BEFORE its ignore rule existed must be
+    untracked (`git rm --cached`) by the migration helper, but its working
+    tree copy must remain on disk. Acceptance criterion #462.5: the fix
+    only helps existing agents if previously-tracked runtime files are
+    removed from the index too.
+    """
+    gs = _load_git_service()
+
+    # Fresh repo with deterministic identity so commits don't fail under CI.
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=10,
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("config", "commit.gpgsign", "false")
+
+    # Force-track files that the new patterns ignore. Use `-f` to bypass any
+    # ignore rule (simulating an old agent that committed these before the
+    # fix landed).
+    cache_file = tmp_path / ".cache" / "leaked"
+    session_file = tmp_path / ".claude" / "sessions" / "leaked"
+    keeper = tmp_path / "agent" / "skill.md"
+    for f, content in [
+        (cache_file, "old cache"),
+        (session_file, "old session"),
+        (keeper, "real value"),
+    ]:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(content)
+
+    git("add", "-f", str(cache_file), str(session_file), str(keeper))
+    git("commit", "-q", "-m", "seed runtime files")
+
+    # Sanity: all three files start out tracked.
+    tracked_before = set(git("ls-files").stdout.splitlines())
+    assert ".cache/leaked" in tracked_before
+    assert ".claude/sessions/leaked" in tracked_before
+    assert "agent/skill.md" in tracked_before
+
+    # Run the real migration: gitignore merge + rm-cached for ignored files.
+    for build in (
+        gs._build_gitignore_merge_command,
+        gs._build_rm_cached_ignored_command,
+    ):
+        result = subprocess.run(
+            build(str(tmp_path)),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"command failed: {build.__name__}\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+
+    tracked_after = set(git("ls-files").stdout.splitlines())
+
+    # The runtime files must be untracked now.
+    assert ".cache/leaked" not in tracked_after, (
+        f".cache/leaked still tracked after migration; tracked={tracked_after}"
+    )
+    assert ".claude/sessions/leaked" not in tracked_after, (
+        f".claude/sessions/leaked still tracked; tracked={tracked_after}"
+    )
+    # The agent-value file must remain tracked.
+    assert "agent/skill.md" in tracked_after, (
+        f"agent/skill.md was wrongly untracked; tracked={tracked_after}"
+    )
+
+    # Working-tree files MUST still exist on disk — the migration only
+    # touches the index, never the user's files.
+    assert cache_file.exists(), "rm --cached must not delete the on-disk file"
+    assert session_file.exists(), "rm --cached must not delete the on-disk file"

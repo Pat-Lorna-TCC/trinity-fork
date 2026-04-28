@@ -497,6 +497,12 @@ async def sync_to_github(
             message="Agent must be running to sync"
         )
 
+    # #462: bring the workspace `.gitignore` up to the current canonical list
+    # and untrack any files that NOW match a rule. Runs on every Push so
+    # existing agents migrate without re-init or container rebuild. Best
+    # effort — failures are logged inside the helper and Push proceeds.
+    await _migrate_workspace_gitignore(agent_name)
+
     try:
         # Call the agent's internal sync endpoint
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -643,22 +649,53 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # Git Initialization in Container
 # ============================================================================
 
-# Hardcoded patterns merged (append-if-missing) into the agent's `.gitignore`
-# at init time. Ordering is preserved in the file so operators reading it see
-# the legacy shell/cache entries first followed by the credential files that
-# `inject_credentials` writes (the trio the #458 bug report named).
+# Canonical exclusion list merged (append-if-missing) into every agent's
+# `.gitignore`. This is the single source of truth — the matching block in
+# `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` mirrors it, and a unit test
+# (`test_doc_and_constant_in_sync`) keeps them aligned.
+#
+# Ordering is preserved in the file so operators reading it see entries
+# grouped by category. The list covers the runtime/instance noise the #462
+# bug report named (1,599 files leaked on a single Push) plus the credential
+# files `inject_credentials` writes (the #458 trio).
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
+    # Shell init / history (instance-specific)
     ".bash_logout",
     ".bashrc",
     ".profile",
     ".bash_history",
+    ".sudo_as_admin_successful",
+    # Credentials — NEVER COMMIT
+    ".env",
+    ".env.*",
+    ".mcp.json",
+    "credentials.json",
+    "*.pem",
+    "*.key",
+    # Instance-specific directories
     ".cache/",
     ".local/",
     ".npm/",
     ".ssh/",
-    ".env",
-    ".env.*",
-    ".mcp.json",
+    ".trinity/",
+    # Large generated content
+    "content/",
+    # Claude Code runtime — commit commands/skills/agents, exclude runtime data
+    ".claude.json",
+    ".claude.json.backup",
+    ".claude/projects/",
+    ".claude/statsig/",
+    ".claude/todos/",
+    ".claude/debug/",
+    ".claude/sessions/",
+    ".claude/shell-snapshots/",
+    # Temporary files
+    "*.log",
+    "*.tmp",
+    ".DS_Store",
+    # Local overrides
+    "*.local.md",
+    "*.local.json",
 )
 
 
@@ -674,6 +711,93 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
         parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
     script = " && ".join(parts)
     return f"bash -c {shlex.quote(script)}"
+
+
+def _build_rm_cached_ignored_command(git_dir: str) -> str:
+    """Build a bash command that ``git rm --cached``s any tracked files that
+    NOW match an ignore rule. Idempotent — `git ls-files -ci` returns the
+    empty set after the first successful run.
+
+    Two-pass: a non-NUL `git ls-files` to check emptiness via shell variable
+    (bash can't hold NUL bytes), then a NUL-delimited pipe to xargs so paths
+    with spaces or unicode survive the round-trip. Working-tree files are
+    left alone; only the index is touched.
+    """
+    script = (
+        f"cd {shlex.quote(git_dir)} && "
+        "ignored=$(git ls-files -ci --exclude-standard) && "
+        'if [ -n "$ignored" ]; then '
+        "git ls-files -ci -z --exclude-standard | "
+        "xargs -0 git rm --cached --quiet -r --; "
+        "fi"
+    )
+    return f"bash -c {shlex.quote(script)}"
+
+
+async def _detect_git_dir(container_name: str) -> str:
+    """Pick the directory git operations should run in for an agent container.
+
+    Standard path is ``/home/developer``. Returns ``/home/developer/workspace``
+    only for legacy agents (created before 2026-02) that have content under
+    that subdirectory. Mirrors the detection ``initialize_git_in_container``
+    has always used so init and the post-init migration agree.
+    """
+    check_workspace = await execute_command_in_container(
+        container_name=container_name,
+        command=(
+            'bash -c "[ -d /home/developer/workspace ] && '
+            'find /home/developer/workspace -mindepth 1 -maxdepth 1 | '
+            'head -1 | wc -l"'
+        ),
+        timeout=5,
+    )
+    workspace_has_content = (
+        check_workspace.get("exit_code") == 0
+        and "1" in check_workspace.get("output", "")
+    )
+    return "/home/developer/workspace" if workspace_has_content else "/home/developer"
+
+
+async def _migrate_workspace_gitignore(agent_name: str) -> None:
+    """Idempotently bring an existing agent's `.gitignore` up to the current
+    `_GITIGNORE_PATTERNS` and untrack any files that NOW match a rule.
+
+    Runs on every Push (#462) so existing agents adopt new patterns without
+    requiring a re-init or container rebuild. Errors are logged and swallowed
+    — a transient migration failure must not break an operator's Push.
+
+    No-op if the container has no `.git` directory (agent not initialized for
+    git sync).
+    """
+    container_name = f"agent-{agent_name}"
+    try:
+        git_dir = await _detect_git_dir(container_name)
+        # Bail if not git-initialized — the agent's /api/git/sync will
+        # return its own 400 in that case.
+        check_git = await execute_command_in_container(
+            container_name=container_name,
+            command=f'bash -c "[ -d {shlex.quote(git_dir)}/.git ]"',
+            timeout=5,
+        )
+        if check_git.get("exit_code") != 0:
+            return
+        # 1. Append missing patterns (idempotent).
+        await execute_command_in_container(
+            container_name=container_name,
+            command=_build_gitignore_merge_command(git_dir),
+            timeout=10,
+        )
+        # 2. Untrack any indexed files that now match an ignore rule.
+        await execute_command_in_container(
+            container_name=container_name,
+            command=_build_rm_cached_ignored_command(git_dir),
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"_migrate_workspace_gitignore failed for {agent_name}: {exc}. "
+            "Push will proceed against the existing .gitignore."
+        )
 
 
 @dataclass
@@ -724,28 +848,13 @@ async def initialize_git_in_container(
     """
     container_name = f"agent-{agent_name}"
 
-    # Step 1: Determine git directory
-    # NOTE: All agents use /home/developer as their home directory.
-    # The /home/developer/workspace check is LEGACY support for agents created before 2026-02.
-    # New agents should never have a workspace subdirectory.
-    check_workspace = await execute_command_in_container(
-        container_name=container_name,
-        command='bash -c "[ -d /home/developer/workspace ] && find /home/developer/workspace -mindepth 1 -maxdepth 1 | head -1 | wc -l"',
-        timeout=5
-    )
-
-    workspace_has_content = (
-        check_workspace.get("exit_code") == 0 and
-        "1" in check_workspace.get("output", "")
-    )
-
-    if workspace_has_content:
-        # Legacy agent with workspace subdirectory
-        git_dir = "/home/developer/workspace"
+    # Step 1: Determine git directory (workspace for legacy agents, else home).
+    # Detection logic is shared with `_migrate_workspace_gitignore` so the
+    # post-init Push migration targets the same path.
+    git_dir = await _detect_git_dir(container_name)
+    if git_dir == "/home/developer/workspace":
         logger.info(f"[LEGACY] Using workspace directory with existing content: {git_dir}")
     else:
-        # Standard path for all current agents
-        git_dir = "/home/developer"
         logger.info(f"Using home directory: {git_dir}")
 
     # Step 2: Append any missing `_GITIGNORE_PATTERNS` entries to the

@@ -236,6 +236,8 @@ sequenceDiagram
 
     User->>UI: Click "Sync" button
     UI->>Backend: POST /api/agents/{name}/git/sync
+    Backend->>Container: docker exec — append missing _GITIGNORE_PATTERNS (#462)
+    Backend->>Container: docker exec — git rm --cached newly-ignored tracked files
     Backend->>Container: POST /api/git/sync
     Container->>Container: git add -A
     Container->>Container: git commit -m "Trinity sync: {timestamp}"
@@ -243,6 +245,32 @@ sequenceDiagram
     Container->>Backend: Return commit SHA (or 409 on stale lease)
     Backend->>UI: Show notification (or branch_ownership_collision modal)
 ```
+
+### Per-Push Gitignore Migration (#462)
+
+Before forwarding to the agent's `/api/git/sync`, the platform calls
+`_migrate_workspace_gitignore(agent_name)` in `services/git_service.py`.
+This runs two `docker exec` steps inside the agent container:
+
+1. **Append missing patterns**: `_build_gitignore_merge_command` idempotently
+   appends any `_GITIGNORE_PATTERNS` entries not already present in
+   `/home/developer/.gitignore`. Pre-existing user rules are preserved
+   (each pattern is gated by an exact-line `grep -qxF` check).
+2. **Untrack newly-ignored files**: `_build_rm_cached_ignored_command`
+   runs `git ls-files -ci --exclude-standard | xargs -0 git rm --cached`
+   so files that were force-tracked before a pattern was added (e.g.
+   `.cache/foo` from an old agent) are removed from the index. Working-tree
+   files are left on disk; only the index changes.
+
+The migration is **best effort** — failures are caught, logged at WARNING,
+and Push proceeds against whatever `.gitignore` already exists. Rationale:
+a transient docker exec glitch must not break an operator's Push.
+
+This means existing agents pick up new exclusion patterns automatically on
+their next Push, with no re-init or container rebuild required. The same
+shared `_detect_git_dir` helper used by `initialize_git_in_container`
+guarantees the migration targets the same path as init (`/home/developer`,
+or `/home/developer/workspace` for legacy pre-2026-02 agents).
 
 ---
 

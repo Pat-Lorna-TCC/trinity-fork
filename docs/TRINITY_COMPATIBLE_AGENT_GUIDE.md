@@ -125,35 +125,50 @@ OTHER_VAR=value
 
 ### 5. `.gitignore` (Required)
 
-Must exclude secrets, instance-specific files, and large content:
+Must exclude secrets, instance-specific files, and large content.
+
+> **Source of truth**: this list mirrors `_GITIGNORE_PATTERNS` in
+> `src/backend/services/git_service.py`. The Python constant is the
+> source of truth — the platform appends every entry to the agent's
+> `.gitignore` on init and again on every Push. A unit test
+> (`tests/unit/test_github_init_gitignore.py::test_doc_and_constant_in_sync`)
+> asserts the two stay in sync.
 
 ```gitignore
+# Shell init / history (instance-specific)
+.bash_logout
+.bashrc
+.profile
+.bash_history
+.sudo_as_admin_successful
+
 # Credentials - NEVER COMMIT
-.mcp.json
 .env
+.env.*
+.mcp.json
+credentials.json
 *.pem
 *.key
-credentials.json
+
+# Instance-specific directories - DO NOT COMMIT
+.cache/
+.local/
+.npm/
+.ssh/
+.trinity/
 
 # Large generated content - DO NOT COMMIT
 content/
 
-# Instance-specific directories - DO NOT COMMIT
-.npm/
-.ssh/
-.trinity/
-.cache/
-
-# Instance-specific files - DO NOT COMMIT
+# Claude Code - commit commands/skills/agents, exclude runtime data
 .claude.json
 .claude.json.backup
-.sudo_as_admin_successful
-
-# Claude Code - commit commands/skills/agents, exclude runtime data
 .claude/projects/
 .claude/statsig/
 .claude/todos/
 .claude/debug/
+.claude/sessions/
+.claude/shell-snapshots/
 # Keep: .claude/commands/, .claude/skills/, .claude/agents/, settings.local.json
 
 # Temporary files
@@ -179,6 +194,8 @@ content/
 - ❌ `.claude/statsig/` - Analytics
 - ❌ `.claude/todos/` - Temporary todo lists
 - ❌ `.claude/debug/` - Debug logs
+- ❌ `.claude/sessions/` - Per-session state
+- ❌ `.claude/shell-snapshots/` - Shell environment snapshots
 
 **Note on Skills**: Skills in templates are seeded to the **Platform Skills Library** on first deployment, then managed centrally. See [Platform Skills](#platform-skills).
 
