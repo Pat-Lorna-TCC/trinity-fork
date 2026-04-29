@@ -12,7 +12,7 @@ import secrets
 import httpx
 import logging
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -26,6 +26,8 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
+from dependencies import get_current_user
+from models import User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.docker_service import get_agent_container
 from services.email_service import email_service
@@ -1074,4 +1076,75 @@ async def public_execution_status(
         "status": execution.status,
         "response": execution.response if execution.status in ("success", "failed") else None,
         "error": execution.error if execution.status == "failed" else None,
+    }
+
+
+@router.get("/sessions/{token}")
+async def get_public_link_sessions(
+    token: str,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    List the authenticated user's chat sessions for the agent behind this public link.
+
+    Requires JWT. Returns the caller's own sessions ordered most-recent first,
+    capped at `limit` (default 20). Does not require agent sharing — the public
+    link token acts as the access credential for this read-only history view.
+    """
+    link = _validate_public_link(token)
+    agent_name = link["agent_name"]
+
+    sessions = db.get_agent_chat_sessions(
+        agent_name=agent_name,
+        user_id=current_user.id,
+    )
+    page = sessions[:limit]
+
+    result = []
+    for s in page:
+        entry = s.model_dump()
+        # Attach a preview from the most recent message in the session
+        recent = db.get_chat_messages(s.id, limit=1)
+        entry["preview"] = recent[0].content[:120] if recent else None
+        result.append(entry)
+
+    return {
+        "session_count": len(result),
+        "sessions": result,
+    }
+
+
+@router.get("/sessions/{token}/{session_id}")
+async def get_public_link_session_detail(
+    token: str,
+    session_id: str,
+    limit: int = 100,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get messages for a specific chat session via a public link token.
+
+    Requires JWT. The session must belong to the authenticated user and to
+    the agent referenced by the public link token.
+    """
+    link = _validate_public_link(token)
+    agent_name = link["agent_name"]
+
+    session = db.get_chat_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.agent_name != agent_name:
+        raise HTTPException(status_code=403, detail="Session does not belong to this agent")
+
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You don't have access to this session")
+
+    messages = db.get_chat_messages(session_id, limit=limit)
+
+    return {
+        "session": session.model_dump(),
+        "message_count": len(messages),
+        "messages": [m.model_dump() for m in messages],
     }

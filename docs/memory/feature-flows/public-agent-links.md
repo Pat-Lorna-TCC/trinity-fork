@@ -1,6 +1,6 @@
 # Feature Flow: Public Agent Links (12.2)
 
-**Last Updated**: 2026-04-13
+**Last Updated**: 2026-04-29
 
 ## Overview
 
@@ -37,13 +37,15 @@ Public Agent Links allow agent owners to generate shareable URLs that enable una
 |                         Backend API                                |
 +-------------------------------------------------------------------+
 |  routers/public_links.py       routers/public.py                  |
-|  (Authenticated)               (Unauthenticated)                  |
+|  (Authenticated)               (Unauthenticated + JWT optional)   |
 |                                                                    |
 |  - CRUD endpoints              - Link validation                  |
 |  - Owner verification          - Email verification               |
 |  - Usage stats                 - Public chat (async mode)         |
 |                                - SSE stream proxy (THINK-001)     |
 |                                - Execution status polling         |
+|                                - Session list (JWT, #587)         |
+|                                - Session detail (JWT, #587)       |
 +-------------------------------------------------------------------+
                                   |
          +------------------------+------------------------+
@@ -272,6 +274,8 @@ import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } 
 | `GET /api/public/intro/{token}` | `public.py:374` | `get_agent_intro()` |
 | `GET /api/public/executions/{token}/{execution_id}/stream` | `public.py:676` | `public_stream_execution()` (THINK-001 SSE proxy) |
 | `GET /api/public/executions/{token}/{execution_id}/status` | `public.py:735` | `public_execution_status()` (THINK-001 polling) |
+| `GET /api/public/sessions/{token}` | `public.py` | `list_public_sessions()` — JWT required; returns caller's last 20 sessions for this agent link with `preview` field (#587) |
+| `GET /api/public/sessions/{token}/{session_id}` | `public.py` | `get_public_session()` — JWT required; returns session detail with messages; validates session belongs to caller and correct agent (#587) |
 
 ### Database Operations
 
@@ -1772,10 +1776,185 @@ Summarization is triggered every 5th message per `(agent_name, user_email)` pair
 
 ---
 
+## Chat History for Logged-In Users (#587)
+
+**Status**: Implemented (2026-04-29)
+
+Logged-in Trinity users visiting a public chat link can browse and replay their own past chat sessions. Anonymous users see no change to the existing UI.
+
+### Design Principles
+
+- The public link token remains the agent-access credential; the JWT identifies which user's sessions to return.
+- Past sessions are opened in **read-only mode** — the chat input is hidden to prevent false continuity with the live agent context.
+- Access does not require `agent_sharing` membership; token + JWT is sufficient.
+- Only sessions created while logged in are visible ("Logged-in chats only" — anonymous sessions are excluded).
+
+### Data Flow
+
+```
+Logged-in user opens /chat/{token}
+        |
+        v
+PublicChat.vue checks authStore.isAuthenticated
+  -> true: renders ChatHistoryDropdown in header
+        |
+        v
+User clicks history button
+        |
+        v
+ChatHistoryDropdown fetches
+  GET /api/public/sessions/{token}
+  Authorization: Bearer <jwt>
+        |
+        v
+Backend: validate token -> resolve agent_name
+  SELECT last 20 chat_sessions WHERE
+    agent_name = ? AND user_id = ?
+  ORDER BY last_message_at DESC
+  Includes preview (last message snippet, 120 chars)
+        |
+        v
+Dropdown renders session list
+  - Formatted date (Today / Yesterday / 3d ago / Apr 5)
+  - Message count
+  - Preview snippet
+        |
+        v
+User clicks a session
+        |
+        v
+ChatHistoryDropdown fetches
+  GET /api/public/sessions/{token}/{session_id}
+  Authorization: Bearer <jwt>
+        |
+        v
+Backend: validate token -> resolve agent_name
+  Verify session.agent_name == agent_name
+  Verify session.user_id == current_user.id
+  Return session with messages
+        |
+        v
+PublicChat.vue: handleHistorySessionSelected({ messages, session })
+  viewingHistorySession = session
+  messages loaded in read-only mode
+  ChatInput hidden
+  Amber banner shown: "Viewing past session — Return to current chat"
+        |
+        v
+User clicks "Return to current chat"
+        |
+        v
+exitHistoryView():
+  viewingHistorySession = null
+  reload current live session or fetchIntro()
+  ChatInput restored
+```
+
+### Backend Implementation
+
+**Two new endpoints in `src/backend/routers/public.py`:**
+
+`GET /api/public/sessions/{token}` — list sessions:
+1. Validate public link token (same `is_link_valid()` check used throughout the module).
+2. Resolve `agent_name` from the link row.
+3. Require JWT (`current_user` dependency — not optional).
+4. Query `chat_sessions` for rows matching `agent_name` and `user_id`, ordered by `last_message_at DESC`, limit 20.
+5. For each session, compute `preview` by reading the most recent `chat_messages` row (`role = 'assistant'` preferred) and truncating to 120 chars.
+6. Return list of session dicts (id, started_at, last_message_at, message_count, preview).
+
+`GET /api/public/sessions/{token}/{session_id}` — session detail:
+1. Validate public link token.
+2. Resolve `agent_name`.
+3. Require JWT.
+4. Fetch session by `session_id`; return 404 if not found.
+5. Assert `session.agent_name == agent_name` and `session.user_id == current_user.id`; return 403 otherwise.
+6. Fetch all messages for the session ordered by `timestamp ASC`.
+7. Return session metadata + messages array.
+
+**No new database tables or migrations.** Both endpoints reuse the existing `chat_sessions` and `chat_messages` tables (documented in the main Database Schema section of `architecture.md`).
+
+### Frontend Layer
+
+#### New Component: `ChatHistoryDropdown.vue`
+
+**File**: `src/frontend/src/components/chat/ChatHistoryDropdown.vue`
+
+| Prop / Emit | Type | Description |
+|-------------|------|-------------|
+| `token` prop | String | Public link token (used in API calls) |
+| `session-selected` emit | `{ messages, session }` | Fired when user selects a session |
+
+**Key behaviors:**
+- On open: fetches `GET /api/public/sessions/{token}` using `authStore.authHeader`.
+- Renders a dropdown list of sessions, each showing formatted date, message count, and preview snippet.
+- Click-outside handler closes the dropdown.
+- Date formatting: "Today", "Yesterday", "3d ago", or locale short date (e.g., "Apr 5").
+
+**Imports** (added to `src/frontend/src/components/chat/index.js`):
+```javascript
+export { default as ChatHistoryDropdown } from './ChatHistoryDropdown.vue'
+```
+
+#### Changes to `PublicChat.vue`
+
+**New imports:**
+```javascript
+import { useAuthStore } from '../stores/auth'
+import { ChatHistoryDropdown } from '../components/chat'
+```
+
+**New state:**
+```javascript
+const authStore = useAuthStore()
+const viewingHistorySession = ref(null)   // non-null = read-only history mode
+```
+
+**New methods:**
+
+| Method | Description |
+|--------|-------------|
+| `handleHistorySessionSelected({ messages, session })` | Sets `viewingHistorySession`, replaces displayed messages with the past session's messages |
+| `exitHistoryView()` | Clears `viewingHistorySession`; reloads current live session via `loadHistory()` or falls back to `fetchIntro()` |
+
+**Template changes:**
+- Header: `<ChatHistoryDropdown v-if="authStore.isAuthenticated && linkInfo?.valid" :token="token" @session-selected="handleHistorySessionSelected" />`
+- Amber read-only banner: shown when `viewingHistorySession` is set; includes "Return to current chat" button that calls `exitHistoryView()`.
+- `<ChatInput>` wrapped in `v-if="!viewingHistorySession"` — hidden during history replay.
+
+### Access Control Summary
+
+| Condition | Sessions endpoint behavior |
+|-----------|---------------------------|
+| No JWT | 401 Unauthorized |
+| Valid JWT, valid token | Returns caller's own sessions only |
+| Valid JWT, wrong user's session_id | 403 Forbidden |
+| Valid JWT, session belongs to different agent | 403 Forbidden |
+
+### Error Handling
+
+| Error Case | HTTP Status | Notes |
+|------------|-------------|-------|
+| Invalid / disabled / expired public link token | 404 | Same as all other `/api/public/*` endpoints |
+| No JWT provided | 401 | `Depends(get_current_user)` rejects unauthenticated requests |
+| Session not found | 404 | Unknown `session_id` |
+| Session belongs to wrong user or agent | 403 | Ownership mismatch |
+
+### Files
+
+| File | Description |
+|------|-------------|
+| `src/backend/routers/public.py` | Two new endpoint handlers: `list_public_sessions()`, `get_public_session()` |
+| `src/frontend/src/components/chat/ChatHistoryDropdown.vue` | New dropdown component (new file) |
+| `src/frontend/src/components/chat/index.js` | Exports `ChatHistoryDropdown` |
+| `src/frontend/src/views/PublicChat.vue` | Imports `useAuthStore`, `ChatHistoryDropdown`; new `viewingHistorySession` ref; `handleHistorySessionSelected()`, `exitHistoryView()` methods; conditional header, banner, input |
+
+---
+
 ## Revision History
 
 | Date | Changes |
 |------|---------|
+| 2026-04-29 | **#587 Chat History for Logged-In Users**: Two new JWT-authenticated endpoints (`GET /api/public/sessions/{token}`, `GET /api/public/sessions/{token}/{session_id}`) in `public.py`. New `ChatHistoryDropdown.vue` component. `PublicChat.vue` gains `viewingHistorySession` ref, `handleHistorySessionSelected()`, `exitHistoryView()`, amber read-only banner, and hidden `ChatInput` while in history mode. No new DB tables — reuses `chat_sessions`/`chat_messages`. |
 | 2026-04-27 | **fix #539 Context duplication**: `build_public_chat_context()` was called AFTER `add_public_chat_message(role="user")`, causing the current user message to appear twice in every agent prompt (once in "Previous conversation:", once in "Current message:"). Fixed by swapping the call order — context built first from prior history, user message stored after. Added 6 unit tests in `tests/unit/test_public_chat_context.py`. Updated PUB-005 data flow and backend implementation step ordering to reflect correct call order. |
 | 2026-02-19 | **CHAT-001 Shared Components Refactor**: PublicChat.vue now uses shared components from `components/chat/` (ChatMessages, ChatInput, ChatBubble, ChatLoadingIndicator). Shared with new ChatPanel.vue authenticated chat. Updated method line numbers, added Shared Chat Components section. File now 611 lines. |
 | 2026-02-18 | **Tab consolidation**: Public Links tab removed from AgentDetail.vue. PublicLinksPanel now embedded within SharingPanel.vue (lines 82-83, 92), accessible via "Sharing" tab. Updated Entry Points, Components table, Frontend Files table, and Related Flows sections. |

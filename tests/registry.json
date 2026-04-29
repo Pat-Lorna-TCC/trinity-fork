@@ -202,6 +202,13 @@
       "added": "2026-04-23",
       "categories": ["backend", "unit", "lifecycle", "file-sharing"],
       "description": "check_public_folder_mount_matches truth table: enabled+mounted → True, enabled+unmounted → False (needs recreation to attach), disabled+mounted → False (needs recreation to detach), disabled+unmounted → True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
+    },
+    {
+      "file": "test_public_chat_history.py",
+      "feature": "Issue #587",
+      "added": "2026-04-29",
+      "categories": ["backend", "api", "public", "chat"],
+      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} — auth requirements, 404 on invalid tokens, response shape, limit param"
     }
   ]
 }
