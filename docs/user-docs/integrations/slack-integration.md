@@ -28,6 +28,20 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 4. All messages in that channel are routed to the bound agent.
 5. To disconnect, click **Unbind**.
 
+### Changing the DM-Default Agent
+
+DMs to the Slack bot are routed to the workspace's **DM-default agent**. By default the first agent bound to a workspace becomes the DM default, but you can reassign it at any time.
+
+1. Open the agent detail page for the agent you want to receive DMs.
+2. Go to the **Sharing** tab → Slack Channel section.
+3. Click **Set as DM Default**.
+4. The previous DM-default agent retains its channel binding but no longer receives DMs.
+
+**Rules:**
+- Only one agent per workspace can be the DM default at a time.
+- You cannot unbind the current DM-default agent while other agents are still bound to the workspace. Reassign the DM default to another agent first, then unbind.
+- Changing the DM default takes effect immediately — no restart required.
+
 ### Message Flow
 
 ```
@@ -64,6 +78,7 @@ Rate limit and timeout values are configurable via settings (`channel_rate_limit
 | `/api/agents/{name}/slack/channel` | GET | Channel binding status |
 | `/api/agents/{name}/slack/channel` | POST | Create and bind channel |
 | `/api/agents/{name}/slack/channel` | DELETE | Unbind channel |
+| `/api/agents/{name}/slack/channel/dm-default` | PUT | Set this agent as the DM default for its workspace |
 
 ## Limitations
 

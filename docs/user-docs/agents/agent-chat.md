@@ -18,6 +18,23 @@ The Chat tab in Agent Detail provides a bubble UI for conversing with agents, wi
 5. The response appears as a chat bubble with cost and token tracking.
 6. Type `/` to autocomplete playbook commands.
 
+### File Attachments
+
+Attach files to any chat message using the paperclip button or by dragging and dropping onto the chat input.
+
+**Supported types:** images (JPEG, PNG, GIF, WebP), plain text, CSV, JSON. Images are passed to the agent as vision content blocks. Text files are written to `/home/developer/uploads/` inside the agent container and are readable by name.
+
+**Unsupported:** PDF, ZIP, archives, video, audio.
+
+**Limits per message:**
+| | |
+|---|---|
+| Max files | 3 |
+| Max size per file | 5 MB |
+| Max total image size | 10 MB |
+
+Oversized files are rejected client-side with an alert. Files that exceed the total image limit or exceed the per-message count are skipped and a note is appended to the message context. File uploads work in both authenticated chat and public chat.
+
 ### Voice Chat
 
 Voice chat is available directly from the Chat tab.
@@ -27,6 +44,7 @@ Voice chat is available directly from the Chat tab.
 - Transcripts are auto-saved to the chat session with `source="voice"` markers.
 - Requires `GEMINI_API_KEY` configured on the platform.
 - Controls: mute, end session, status indicator.
+- **Tool calling**: during a voice session, Gemini can invoke `run_task` to delegate complex work to the Claude agent. The orb shows an amber badge while the task runs (up to 30 seconds) and returns to the listening state when done.
 
 ### Continue as Chat
 

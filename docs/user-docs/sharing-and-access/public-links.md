@@ -21,6 +21,14 @@ Shareable URLs that let unauthenticated users chat with agents. Supports optiona
 7. Conversations persist -- the user can return later and continue where they left off.
 8. Click **New Conversation** to start a fresh session.
 
+### Chat History for Logged-In Users
+
+When a Trinity user who is logged in opens a public chat link, a **history dropdown** appears at the top of the chat interface showing their previous conversations with that agent. This lets them resume any past session rather than always starting fresh.
+
+- Sessions are identified by the user's verified email, so history is consistent across devices.
+- Clicking a session in the dropdown loads its full message history.
+- Anonymous visitors (not logged into Trinity) see no history dropdown.
+
 ## For Agents
 
 | Endpoint | Method | Description |
