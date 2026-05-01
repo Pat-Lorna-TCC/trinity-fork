@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import stat as _stat
 import subprocess
 import threading
 from typing import Optional
@@ -133,6 +134,76 @@ def safe_close_pipes(process: subprocess.Popen) -> None:
             pass
 
 
+def _kill_orphan_pipe_writers(pipe_read_fd: int, our_pgid: Optional[int]) -> int:
+    """Kill any process outside *our_pgid* that holds the same pipe's write end open.
+
+    Issue #618: npx-based MCP servers (spawned by npm which calls setsid())
+    start in their own process group, survive ``terminate_process_group``, and
+    keep the pipe write FD open indefinitely so the kernel never delivers EOF
+    to our reader thread.
+
+    We identify the target pipe by its inode (shared by both ends of the pipe)
+    and confirm write access via ``/proc/{pid}/fdinfo/{fd}`` flags.  All errors
+    are silently swallowed — this is best-effort cleanup inside the drain path.
+
+    Only meaningful on Linux (requires ``/proc`` filesystem).
+
+    Returns the number of processes that were sent SIGKILL.
+    """
+    try:
+        target_ino = os.fstat(pipe_read_fd).st_ino
+    except OSError:
+        return 0
+
+    killed = 0
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return 0
+
+    for pid_str in proc_entries:
+        if not pid_str.isdigit():
+            continue
+        pid = int(pid_str)
+
+        # Skip processes already inside the killed process group.
+        if our_pgid is not None:
+            try:
+                if os.getpgid(pid) == our_pgid:
+                    continue
+            except OSError:
+                continue
+
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            fd_names = os.listdir(fd_dir)
+        except OSError:
+            continue
+
+        for fd_name in fd_names:
+            try:
+                st = os.stat(f"{fd_dir}/{fd_name}")
+            except OSError:
+                continue
+            if not _stat.S_ISFIFO(st.st_mode) or st.st_ino != target_ino:
+                continue
+            # Matching pipe inode — confirm it's the write end via fdinfo flags.
+            try:
+                with open(f"/proc/{pid}/fdinfo/{fd_name}") as finfo:
+                    fdinfo = finfo.read()
+                if "flags:" not in fdinfo:
+                    continue
+                flags = int(fdinfo.split("flags:")[1].split()[0], 8)
+                if flags & os.O_ACCMODE:  # O_WRONLY=1 or O_RDWR=2, not O_RDONLY=0
+                    os.kill(pid, signal.SIGKILL)
+                    killed += 1
+                    break  # no need to inspect other FDs of this pid
+            except OSError:
+                continue
+
+    return killed
+
+
 def drain_reader_threads(
     process: subprocess.Popen,
     *threads: Optional[threading.Thread],
@@ -175,9 +246,27 @@ def drain_reader_threads(
     )
     terminate_process_group(process, graceful_timeout=1, pgid=pgid)
 
-    # Grandchildren are gone → kernel will EOF the pipe as the last write
-    # FD is reaped → reader's readline() returns '' once it drains the
-    # buffered tail (including the final result JSON line on long tasks).
+    # Issue #618: kill any processes outside our pgid that still hold the
+    # stdout pipe's write end open.  The primary culprit is npm → node MCP
+    # server chains: npm calls setsid() when it spawns node, placing it in a
+    # new process group that survives terminate_process_group(claude_pgid).
+    # The orphan keeps the write FD open so the kernel never delivers EOF to
+    # our reader.  Killing it releases all its FDs (stdout AND stderr write
+    # ends), unblocking both reader threads simultaneously.
+    if process.stdout is not None and not process.stdout.closed:
+        try:
+            orphans = _kill_orphan_pipe_writers(process.stdout.fileno(), pgid)
+            if orphans:
+                logger.info(
+                    "[Subprocess] Killed %s orphan stdout pipe-writer(s) "
+                    "outside pgid=%s (pid=%s) — likely npx MCP server(s)",
+                    orphans, pgid, process.pid,
+                )
+        except Exception:
+            pass  # best-effort; never fail the drain path
+
+    # All writers are now dead → kernel will EOF the pipe once the buffered
+    # tail is consumed → reader's readline() returns '' and the thread exits.
     for t in stuck:
         t.join(timeout=post_kill_grace)
 
