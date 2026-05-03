@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-05-03 | SITE-001 (#633) | Agent website proxy — `type='site'` public links reverse-proxy to agent port 3000 via `routers/site.py`; nginx `/site/` block; per-IP + per-token rate limit; SSRF guard; header stripping; `site_access` audit event | [public-agent-links.md](feature-flows/public-agent-links.md) |
 | 2026-05-03 | #250 | Token usage display — per-agent cost/token stats (24h, 7d, lifetime) from `schedule_executions` DB, shown in AgentHeader as amber sparkline + today's cost + trend vs 7-day average | [token-usage-display.md](feature-flows/token-usage-display.md) |
 | 2026-05-01 | #293 | fix(slack): replace `slackify-markdown 0.2.2` with own `services.slack_mrkdwn` renderer — fixes 5 layout bugs that produced "ugly" output: nested-list flattening, headings crammed against preceding content, blockquote `>` only on first line, raw-pipe table passthrough, dropped `---` rules. 35 unit tests + 13 ported. | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-04-29 | #584 | feat(slack): UI + API to change Slack DM-default agent — `set_slack_dm_default()` DB method (single-tx clear-then-set), `PUT /api/agents/{name}/slack/channel/dm-default` (owner-only, audit-logged), "Make default" button + tooltip in `SlackChannelPanel.vue`, unbind refuses 409 when target is DM default with siblings remaining | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
@@ -222,7 +223,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| Public Agent Links | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links with optional email verification |
+| Public Agent Links | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links: chat (type='chat') and website proxy (type='site', SITE-001) |
 | Slack Integration | [slack-integration.md](feature-flows/slack-integration.md) | Slack as delivery channel for public links (SLACK-001) |
 | Slack Channel Routing | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) | Channel adapter abstraction + multi-agent Slack routing (SLACK-002) |
 | Slack File Sharing | [slack-file-sharing.md](feature-flows/slack-file-sharing.md) | Inbound file uploads: images via vision, text via container (SLACK-FILES) |

@@ -1742,6 +1742,20 @@ def _migrate_agent_shared_files(cursor, conn):
     conn.commit()
 
 
+def _migrate_public_links_type(cursor, conn):
+    """Add type column to agent_public_links for SITE-001.
+
+    'chat' is the legacy default; 'site' is the new type for live web-server proxying.
+    """
+    cursor.execute("PRAGMA table_info(agent_public_links)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "type" not in columns:
+        cursor.execute(
+            "ALTER TABLE agent_public_links ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'"
+        )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1795,4 +1809,5 @@ MIGRATIONS = [
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
     ("agent_shared_files", _migrate_agent_shared_files),
+    ("public_links_type", _migrate_public_links_type),
 ]

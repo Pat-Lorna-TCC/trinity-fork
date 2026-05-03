@@ -1047,8 +1047,8 @@ class DatabaseManager:
     # =========================================================================
 
     def create_public_link(self, agent_name: str, created_by: str, name: str = None,
-                           expires_at: str = None):
-        return self._public_link_ops.create_public_link(agent_name, created_by, name, expires_at)
+                           expires_at: str = None, link_type: str = "chat"):
+        return self._public_link_ops.create_public_link(agent_name, created_by, name, expires_at, link_type)
 
     def get_public_link(self, link_id: str):
         return self._public_link_ops.get_public_link(link_id)

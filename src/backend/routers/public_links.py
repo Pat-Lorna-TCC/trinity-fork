@@ -28,17 +28,24 @@ def set_websocket_manager(ws_manager):
     manager = ws_manager
 
 
-def _build_public_url(token: str) -> str:
+SITE_PORT = 3000  # SITE-001: fixed convention for agent web servers
+
+
+def _build_public_url(token: str, link_type: str = "chat") -> str:
     """Build the internal public URL for a link token."""
+    if link_type == "site":
+        return f"{FRONTEND_URL}/site/{token}/"
     return f"{FRONTEND_URL}/chat/{token}"
 
 
-def _build_external_url(token: str) -> str | None:
+def _build_external_url(token: str, link_type: str = "chat") -> str | None:
     """Build the external public URL for a link token (if configured)."""
     public_chat_url = get_public_chat_url()
-    if public_chat_url:
-        return f"{public_chat_url}/chat/{token}"
-    return None
+    if not public_chat_url:
+        return None
+    if link_type == "site":
+        return f"{public_chat_url}/site/{token}/"
+    return f"{public_chat_url}/chat/{token}"
 
 
 def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithUrl:
@@ -47,6 +54,7 @@ def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithU
     if include_usage:
         usage_stats = db.get_public_link_usage_stats(link["id"])
 
+    link_type = link.get("type", "chat")
     return PublicLinkWithUrl(
         id=link["id"],
         agent_name=link["agent_name"],
@@ -56,8 +64,9 @@ def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithU
         expires_at=datetime.fromisoformat(link["expires_at"]) if link.get("expires_at") else None,
         enabled=link["enabled"],
         name=link.get("name"),
-        url=_build_public_url(link["token"]),
-        external_url=_build_external_url(link["token"]),
+        link_type=link_type,
+        url=_build_public_url(link["token"], link_type),
+        external_url=_build_external_url(link["token"], link_type),
         usage_stats=usage_stats
     )
 
@@ -75,12 +84,17 @@ async def create_public_link(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # Validate link_type
+    if link_request.link_type not in ("chat", "site"):
+        raise HTTPException(status_code=400, detail="link_type must be 'chat' or 'site'")
+
     # Create the public link
     link = db.create_public_link(
         agent_name=agent_name,
         created_by=current_user.username,
         name=link_request.name,
-        expires_at=link_request.expires_at
+        expires_at=link_request.expires_at,
+        link_type=link_request.link_type,
     )
 
     # Broadcast event

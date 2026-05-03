@@ -365,6 +365,7 @@ class PublicLinkCreate(BaseModel):
     """
     name: Optional[str] = None  # Friendly name for the link
     expires_at: Optional[str] = None  # ISO timestamp for expiration
+    link_type: str = "chat"  # 'chat' or 'site' (SITE-001)
 
 
 class PublicLinkUpdate(BaseModel):
@@ -384,6 +385,7 @@ class PublicLink(BaseModel):
     expires_at: Optional[datetime] = None
     enabled: bool = True
     name: Optional[str] = None
+    link_type: str = "chat"  # 'chat' or 'site' (SITE-001)
 
 
 class PublicLinkWithUrl(PublicLink):
