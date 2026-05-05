@@ -799,7 +799,7 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - OAuth flow for workspace connection
   - Signature verification for Slack events
 - **Database Tables**:
-  - `slack_link_connections` - Connects workspace to public link
+  - `slack_link_connections` - Connects workspace to public link (bot_token AES-256-GCM encrypted, #453)
   - `slack_user_verifications` - Tracks verified Slack users
   - `slack_pending_verifications` - In-progress email verifications
 - **API Endpoints**:

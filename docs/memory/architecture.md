@@ -761,7 +761,7 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 11. **Docker as Source of Truth** — Agent container state comes from Docker labels (`trinity.*`), not from an in-memory registry. `docker_service.py` is the single point of Docker interaction.
 
-12. **Credentials: File Injection, Never Stored in DB** — Credentials use `.env` files injected into containers (CRED-002). Encrypted exports use AES-256-GCM (`.credentials.enc`). Redis holds transient secrets. Never persist credential values in SQLite.
+12. **Credentials: File Injection, Never Stored in DB as Plaintext** — Credentials use `.env` files injected into containers (CRED-002). Encrypted exports use AES-256-GCM (`.credentials.enc`). Redis holds transient secrets. **Exception with mandatory encryption**: channel bot/auth tokens (Slack, Telegram, WhatsApp) and subscription/Nevermined OAuth tokens are persisted in SQLite because they drive long-lived background processes (webhook receivers, scheduled bots) that can't depend on container env vars. These MUST be wrapped in AES-256-GCM JSON envelopes via `services/credential_encryption.py` — plaintext persistence is forbidden. Tables under this rule: `subscription_credentials.encrypted_credentials`, `nevermined_agent_config.encrypted_credentials`, `telegram_bindings.bot_token_encrypted`, `whatsapp_bindings.auth_token_encrypted`, `agent_git_config.github_pat_encrypted`, `slack_workspaces.bot_token` (TEXT column, JSON-envelope content), `slack_link_connections.slack_bot_token` (TEXT column, JSON-envelope content — encrypted by #453, 2026-05-05).
 
 13. **MCP Server = Third Surface in Sync** — The MCP server (`src/mcp-server/src/tools/*.ts`) is a TypeScript proxy over the backend API. When adding a backend endpoint for external access, the MCP tool module needs updating too. Three surfaces must stay in sync: backend router, agent server (if internal), MCP tool (if external).
 
@@ -1165,12 +1165,28 @@ CREATE TABLE slack_workspaces (
     id TEXT PRIMARY KEY,
     team_id TEXT UNIQUE NOT NULL,          -- Slack workspace team ID
     team_name TEXT,                        -- Workspace display name
-    bot_token TEXT NOT NULL,               -- Bot OAuth token
+    bot_token TEXT NOT NULL,               -- AES-256-GCM JSON envelope of OAuth token
     connected_by TEXT,                     -- User who connected
     connected_at TEXT NOT NULL,
     enabled INTEGER DEFAULT 1
 );
 ```
+**Note**: `bot_token` column type is `TEXT` but its contents are an AES-256-GCM JSON envelope (`{"version": 1, "algorithm": "AES-256-GCM", "nonce": "...", "ciphertext": "..."}`). The column was not renamed to `bot_token_encrypted` for backward compatibility with existing rows; the read path in `db/slack_channels.py:_decrypt_token` handles both encrypted and legacy plaintext (`xoxb-*`) values. Plaintext rows are re-encrypted on the next backend restart by the `slack_bot_token_encryption` migration (#453).
+
+**slack_link_connections:** (SLACK-001 - Public Link Slack Integration)
+```sql
+CREATE TABLE slack_link_connections (
+    id TEXT PRIMARY KEY,
+    link_id TEXT NOT NULL UNIQUE,          -- FK to agent_public_links
+    slack_team_id TEXT NOT NULL UNIQUE,    -- Slack workspace ID
+    slack_team_name TEXT,                  -- Workspace display name
+    slack_bot_token TEXT NOT NULL,         -- AES-256-GCM JSON envelope of OAuth token
+    connected_by TEXT NOT NULL,            -- User who connected
+    connected_at TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1
+);
+```
+**Note**: One Slack workspace = one public link = one agent (the SLACK-001 model). Coexists with `slack_workspaces` (SLACK-002 multi-agent routing) — different products, different OAuth installations possible. `slack_bot_token` follows the same encrypted-JSON-envelope-in-TEXT pattern as `slack_workspaces.bot_token` (encrypted by #453, 2026-05-05).
 
 **slack_channel_agents:** (SLACK-002 - Channel Adapters)
 ```sql
