@@ -894,19 +894,31 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                 for line in iter(process.stdout.readline, ''):
                     if not line:
                         break
+                    # Issue #630: per-line try/except so one bad line does
+                    # not kill the reader and cost us the result line later
+                    # in the stream.
                     try:
-                        raw_msg = json.loads(line.strip())
-                        if not isinstance(raw_msg, dict):
-                            # stream-json can emit string literals; skip them
-                            continue
-                        # SECURITY: Sanitize credentials from output before storing
-                        raw_msg = sanitize_dict(raw_msg)
-                        raw_messages.append(raw_msg)
-                        registry.publish_log_entry(execution_id, raw_msg)
-                    except json.JSONDecodeError:
-                        pass
-                    sanitized_line = sanitize_subprocess_line(line)
-                    process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                        try:
+                            raw_msg = json.loads(line.strip())
+                        except json.JSONDecodeError:
+                            raw_msg = None
+
+                        if isinstance(raw_msg, dict):
+                            # SECURITY: Sanitize credentials from output before storing
+                            raw_msg = sanitize_dict(raw_msg)
+                            raw_messages.append(raw_msg)
+                            try:
+                                registry.publish_log_entry(execution_id, raw_msg)
+                            except Exception as pub_err:  # noqa: BLE001
+                                logger.warning(
+                                    f"publish_log_entry failed (continuing): {pub_err}"
+                                )
+                        sanitized_line = sanitize_subprocess_line(line)
+                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                    except Exception as line_err:  # noqa: BLE001
+                        logger.warning(
+                            f"Per-line stdout processing error (continuing): {line_err}"
+                        )
             except Exception as e:
                 logger.error(f"Error reading Claude output: {e}")
 
@@ -1220,6 +1232,82 @@ def _classify_signal_exit(
     return (504, detail)
 
 
+def _recover_metadata_from_raw_messages(
+    metadata: Optional['ExecutionMetadata'],
+    raw_messages: Optional[List[Dict]],
+) -> bool:
+    """Back-fill ``metadata`` from a ``{"type": "result"}`` entry in
+    ``raw_messages`` when ``process_stream_line`` failed to populate it.
+
+    Issue #630: even when the reader thread successfully appends the result
+    line to ``raw_messages``, ``process_stream_line`` may not run for that
+    line if the reader is interrupted between the append and the parse
+    (registry publish raising, permission-validation re-raise, any other
+    in-loop exception). In that case ``metadata.cost_usd`` /
+    ``duration_ms`` stay ``None`` even though Claude completed cleanly and
+    the final stats are sitting in ``raw_messages[-1]``.
+
+    This recovery pass scans ``raw_messages`` from the end (the result line
+    is always last) and copies the fields ``process_stream_line`` would
+    have set: ``cost_usd``, ``duration_ms``, ``num_turns``, and the token
+    counters from ``usage`` / ``modelUsage``. ``error_type`` / response
+    text are not back-filled — those drive control flow and would change
+    behaviour beyond this defensive recovery.
+
+    Returns ``True`` if recovery populated metadata, ``False`` otherwise.
+    Safe to call when metadata is already populated — short-circuits.
+    """
+    if metadata is None or not raw_messages:
+        return False
+    if metadata.cost_usd is not None or metadata.duration_ms is not None:
+        return False
+
+    for msg in reversed(raw_messages):
+        if not isinstance(msg, dict) or msg.get("type") != "result":
+            continue
+
+        cost = msg.get("total_cost_usd")
+        dur = msg.get("duration_ms")
+        if cost is None and dur is None:
+            return False  # malformed result entry — nothing to recover
+
+        metadata.cost_usd = cost
+        metadata.duration_ms = dur
+        metadata.num_turns = msg.get("num_turns")
+
+        usage = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
+        if usage:
+            metadata.input_tokens = usage.get("input_tokens", metadata.input_tokens) or metadata.input_tokens
+            metadata.output_tokens = usage.get("output_tokens", metadata.output_tokens) or metadata.output_tokens
+            metadata.cache_creation_tokens = (
+                usage.get("cache_creation_input_tokens", metadata.cache_creation_tokens)
+                or metadata.cache_creation_tokens
+            )
+            metadata.cache_read_tokens = (
+                usage.get("cache_read_input_tokens", metadata.cache_read_tokens)
+                or metadata.cache_read_tokens
+            )
+
+        model_usage = msg.get("modelUsage", {})
+        if isinstance(model_usage, dict):
+            for _, model_data in model_usage.items():
+                if not isinstance(model_data, dict):
+                    continue
+                if "contextWindow" in model_data:
+                    metadata.context_window = model_data["contextWindow"]
+                model_in = model_data.get("inputTokens")
+                if isinstance(model_in, int) and model_in > metadata.input_tokens:
+                    metadata.input_tokens = model_in
+                model_out = model_data.get("outputTokens")
+                if isinstance(model_out, int) and model_out > metadata.output_tokens:
+                    metadata.output_tokens = model_out
+                break  # first model wins, mirrors process_stream_line
+
+        return True
+
+    return False
+
+
 def _classify_empty_result(
     metadata: Optional['ExecutionMetadata'] = None,
     raw_message_count: int = 0,
@@ -1249,6 +1337,13 @@ def _classify_empty_result(
     None (populated only by that line). Derive honest counts from
     raw_messages when available so the 502 detail is accurate. (#531)
 
+    Issue #630: before classifying, attempt
+    ``_recover_metadata_from_raw_messages`` — covers the case where the
+    result line *was* parsed and appended to raw_messages but
+    process_stream_line failed to run for it (reader-thread exit between
+    append and parse). When recovery succeeds, metadata is populated and
+    the function falls through to the success path.
+
     Returns ``(status_code, detail)`` for empty-result exits, or ``None``
     if metadata looks well-formed (caller proceeds with the normal
     response-building path).
@@ -1256,6 +1351,14 @@ def _classify_empty_result(
     if metadata is None:
         return None
     if metadata.cost_usd is not None or metadata.duration_ms is not None:
+        return None
+
+    if _recover_metadata_from_raw_messages(metadata, raw_messages):
+        logger.warning(
+            "[Headless Task] Recovered result metadata from raw_messages "
+            "(stream parser missed the result line; cost=%s duration=%sms turns=%s)",
+            metadata.cost_usd, metadata.duration_ms, metadata.num_turns,
+        )
         return None
 
     # tool_count is accumulated per-message during parsing (line ~1467), so
@@ -1504,52 +1607,75 @@ async def execute_headless_task(
                     if auth_abort_event.is_set():
                         logger.info(f"[Headless Task] Stdout loop exiting due to auth abort")
                         break
-                    # Capture raw JSON for full execution log
-                    try:
-                        raw_msg = json.loads(line.strip())
-                        if not isinstance(raw_msg, dict):
-                            # stream-json can emit string literals; skip them
-                            continue
-                        # SECURITY: Sanitize credentials from output before storing
-                        raw_msg = sanitize_dict(raw_msg)
-                        raw_messages.append(raw_msg)
-                        # Publish to live streaming subscribers
-                        registry.publish_log_entry(task_session_id, raw_msg)
 
-                        # Validate permissionMode on init message (first message from Claude Code).
-                        # If permission bypass isn't active, kill immediately instead of timing out
-                        # after hours with zero work completed (all tool calls silently denied).
-                        # Claude Code emits {"type": "system", "subtype": "init", ...} — see Appendix B
-                        # of docs/planning/SESSION_TAB_2026-04.md.
-                        if (
-                            raw_msg.get("type") == "system"
-                            and raw_msg.get("subtype") == "init"
-                            and not permission_mode_validated
-                        ):
-                            perm_mode = raw_msg.get("permissionMode", "unknown")
-                            if perm_mode == "bypassPermissions":
-                                permission_mode_validated = True
-                                logger.info(f"[Headless Task] Permission mode confirmed: {perm_mode}")
-                            else:
-                                logger.error(
-                                    f"[Headless Task] CRITICAL: Permission bypass not active! "
-                                    f"permissionMode={perm_mode} (expected bypassPermissions). "
-                                    f"Killing process tree to prevent silent timeout. "
-                                    f"Task: {task_session_id}"
+                    # Issue #630: each line is processed inside a per-line
+                    # try/except so a single failure (publish_log_entry
+                    # raising, process_stream_line tripping on weird input,
+                    # any non-RuntimeError exception) does not kill the
+                    # reader. If the reader exits early the result line
+                    # later in the stream is lost and the execution is
+                    # misclassified as "completed without a result message".
+                    # RuntimeError (permission-mode failure) is intentional
+                    # — keep the existing fast-fail behaviour.
+                    try:
+                        try:
+                            raw_msg = json.loads(line.strip())
+                        except json.JSONDecodeError:
+                            raw_msg = None
+
+                        if isinstance(raw_msg, dict):
+                            # SECURITY: Sanitize credentials from output before storing
+                            raw_msg = sanitize_dict(raw_msg)
+                            raw_messages.append(raw_msg)
+                            # Publish to live streaming subscribers — isolate
+                            # so subscriber-side breakage cannot back-pressure
+                            # the reader.
+                            try:
+                                registry.publish_log_entry(task_session_id, raw_msg)
+                            except Exception as pub_err:  # noqa: BLE001
+                                logger.warning(
+                                    f"[Headless Task] publish_log_entry failed (continuing): {pub_err}"
                                 )
-                                _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid)
-                                raise RuntimeError(
-                                    f"Permission bypass failed: permissionMode={perm_mode}. "
-                                    f"This may be caused by a stale Claude Code session process "
-                                    f"or project settings overriding the CLI flag. "
-                                    f"Try restarting the agent container."
-                                )
-                    except json.JSONDecodeError:
-                        pass
-                    # SECURITY: Sanitize the line before processing
-                    sanitized_line = sanitize_subprocess_line(line)
-                    # Process each line for metadata/tool tracking
-                    process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+
+                            # Validate permissionMode on init message (first message from Claude Code).
+                            # If permission bypass isn't active, kill immediately instead of timing out
+                            # after hours with zero work completed (all tool calls silently denied).
+                            # Claude Code emits {"type": "system", "subtype": "init", ...} — see Appendix B
+                            # of docs/planning/SESSION_TAB_2026-04.md.
+                            if (
+                                raw_msg.get("type") == "system"
+                                and raw_msg.get("subtype") == "init"
+                                and not permission_mode_validated
+                            ):
+                                perm_mode = raw_msg.get("permissionMode", "unknown")
+                                if perm_mode == "bypassPermissions":
+                                    permission_mode_validated = True
+                                    logger.info(f"[Headless Task] Permission mode confirmed: {perm_mode}")
+                                else:
+                                    logger.error(
+                                        f"[Headless Task] CRITICAL: Permission bypass not active! "
+                                        f"permissionMode={perm_mode} (expected bypassPermissions). "
+                                        f"Killing process tree to prevent silent timeout. "
+                                        f"Task: {task_session_id}"
+                                    )
+                                    _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid)
+                                    raise RuntimeError(
+                                        f"Permission bypass failed: permissionMode={perm_mode}. "
+                                        f"This may be caused by a stale Claude Code session process "
+                                        f"or project settings overriding the CLI flag. "
+                                        f"Try restarting the agent container."
+                                    )
+
+                        # SECURITY: Sanitize the line before processing
+                        sanitized_line = sanitize_subprocess_line(line)
+                        # Process each line for metadata/tool tracking
+                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                    except RuntimeError:
+                        raise  # Re-raise permission-mode failures
+                    except Exception as line_err:  # noqa: BLE001
+                        logger.warning(
+                            f"[Headless Task] Per-line stdout processing error (continuing): {line_err}"
+                        )
             except RuntimeError:
                 raise  # Re-raise permission mode failures
             except Exception as e:
