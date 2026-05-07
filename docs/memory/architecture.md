@@ -261,7 +261,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 ### Frontend (`src/frontend/`)
 
 **Key Directories:**
-- `src/views/` - Page components (Dashboard, Agents, Templates, ApiKeys, AgentCollaboration)
+- `src/views/` - Page components (Dashboard, Agents, Templates, Settings, AgentCollaboration)
 - `src/stores/` - Pinia state (agents.js, auth.js, collaborations.js)
 - `src/components/` - Reusable UI components (NavBar, CredentialsPanel, AgentNode)
 - `src/utils/` - WebSocket client, helpers
@@ -1471,7 +1471,7 @@ External Claude Code clients authenticate to Trinity MCP Server using MCP API Ke
 
 | Component | Details |
 |-----------|---------|
-| **Creation** | User creates via UI `/api-keys` page |
+| **Creation** | User creates via UI `/settings?tab=mcp-keys` |
 | **Format** | `trinity_mcp_{random}` (44 chars) |
 | **Storage** | SHA-256 hash in SQLite |
 | **Transport** | `Authorization: Bearer trinity_mcp_...` header |
