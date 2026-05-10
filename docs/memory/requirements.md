@@ -2005,6 +2005,58 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 
 ---
 
+## 31. Canary Invariant Harness (CANARY-001)
+
+### 31.1 Continuous Orchestration-Invariant Watcher (CANARY-001 — Phase 1)
+- **Implements**: Issue #411 — first three invariants (S-01, E-02, L-03)
+- **Description**: Background watcher service that runs deterministic
+  orchestration-invariant checks against live platform state every 5
+  minutes. Persists violations to a queryable table and classifies
+  green→red transitions for an external alert sink. Catches the bug
+  class behind PRs #378, #403, #129, #226 — race conditions and
+  cross-component state drift that unit tests miss.
+- **Architecture**: deterministic Python library (`src/backend/canary/`)
+  shared between the watcher service (`services/canary_service.py`) and
+  the on-demand admin endpoint (`POST /api/canary/run-cycle`). Library
+  reads state but writes nothing; service writes violations and
+  classifies transitions.
+- **Phase 1 invariants**:
+  - **S-01** Slot–row bijection (Redis ZRANGE vs SQL running rows, drain
+    sentinels filtered)
+  - **E-02** No phantom reversal (terminal executions stay terminal,
+    detected via Redis-backed state comparison)
+  - **L-03** Delete cascades (no orphan rows referencing removed agents
+    in any cross-cutting table; no orphan Redis slot keys)
+- **Storage**: `canary_violations` table; observed_state JSON column.
+- **Activation**: gated by `CANARY_ENABLED=1` env var; disabled by
+  default. Production deployment is staging/dev — the harness watches
+  there, not in user-facing prod.
+- **Fleet**: `config/canary-fleet.yaml` deploys two synthetic agents
+  (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
+  the existing `/api/systems/deploy` endpoint. Without the fleet, the
+  watcher reports trivially-green cycles with no signal.
+- **Alert sink**: Slack via incoming webhook URL configured by the
+  `CANARY_SLACK_WEBHOOK_URL` env var (admin-side, no Settings UI — the
+  audience is operators with shell access on staging/dev). Each
+  green→red transition fires exactly one webhook POST with a Block Kit
+  payload (severity emoji header, rendered violation summary, context
+  line with snapshot_time + violation count + "last red Xm ago"
+  badge). Unset = silent sink: cycles still run, violations still
+  persist to `canary_violations`, only the outbound POST is skipped.
+  Continuing-red invariants don't re-post. The dashboard-notifications
+  path (writing `agent_notifications` rows via `db.create_notification`)
+  was rejected on the product call.
+- **Determinism**: invariant checks are pure functions
+  `check(snapshot) → list[ViolationReport]`. Same snapshot input always
+  yields the same output. No LLM reasoning anywhere in the canary path.
+- **Phase 2 (deferred)**: S-02, S-03, E-01, E-05, E-06, B-01, B-02,
+  G-01, R-01 (per the catalog at
+  `docs/testing/orchestration-invariant-catalog.md`). Each adds as a new
+  file under `src/backend/canary/invariants/` and a registry entry; the
+  service and API surface stay unchanged.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

@@ -1014,6 +1014,28 @@ TABLES = {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """,
+
+    # -------------------------------------------------------------------------
+    # Canary Invariant Harness (CANARY-001 / Issue #411 — Phase 1)
+    # -------------------------------------------------------------------------
+    # Continuous orchestration-invariant violations recorded by the canary
+    # watcher service (`services/canary_service.py`). Each row is one fired
+    # check; the row stores the invariant id, tier, severity, snapshot
+    # timestamp, and a JSON `observed_state` payload specific to the
+    # invariant. The service writes here every cycle and posts to a Slack
+    # webhook (`CANARY_SLACK_WEBHOOK_URL`) on green→red transitions.
+    "canary_violations": """
+        CREATE TABLE IF NOT EXISTS canary_violations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invariant_id TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            observed_state TEXT NOT NULL,
+            signal_query TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """,
 }
 
 # =============================================================================
@@ -1189,6 +1211,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+
+    # Canary violations indexes (CANARY-001 / Issue #411 — Phase 1)
+    "CREATE INDEX IF NOT EXISTS idx_canary_violations_invariant ON canary_violations(invariant_id, snapshot_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_canary_violations_severity ON canary_violations(severity, snapshot_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_canary_violations_snapshot ON canary_violations(snapshot_time DESC)",
 
     # Subscription credentials indexes (SUB-001)
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",

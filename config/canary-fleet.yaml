@@ -1,0 +1,63 @@
+# Canary Invariant Harness — load-generator fleet (CANARY-001 / Issue #411).
+#
+# This manifest defines the synthetic agents that the canary watcher
+# observes. Without traffic, every invariant holds trivially and the
+# harness produces no signal. The fleet is what makes the harness useful.
+#
+# Deploy on staging/dev with:
+#
+#     curl -sS -X POST -H "Authorization: Bearer <admin-token>" \
+#       -H "Content-Type: application/json" \
+#       -d "{\"manifest\": $(jq -Rs . < config/canary-fleet.yaml)}" \
+#       http://localhost:8000/api/systems/deploy
+#
+# The watcher service (src/backend/services/canary_service.py) runs every
+# 5 min independently of this fleet — it'll just observe trivially-green
+# state until the fleet generates load.
+#
+# Permissions are explicitly empty (preset: none) — fleet members observe
+# their own orchestration, not each other.
+
+name: canary-fleet
+description: Canary harness load generators (Issue #411 Phase 1)
+
+agents:
+  # Constant slot churn — fires every minute (cron's minimum). Exercises
+  # S-01 (slot–row bijection) and E-02 (no phantom reversal) by producing
+  # a steady stream of acquire / release cycles.
+  #
+  # `test-echo` is Trinity's minimal stock template (no MCP servers, no
+  # credentials, deterministic short reply) — exactly what slot-churn
+  # invariants need.
+  burst:
+    template: local:test-echo
+    resources:
+      cpu: "1"
+      memory: "512m"
+    schedules:
+      - name: heartbeat
+        cron: "* * * * *"  # every minute
+        message: "ok"
+        timezone: UTC
+        description: Constant load to exercise slot–row bijection (S-01) and reversal (E-02)
+
+  # Slower cadence so multiple slots overlap across cycles. Phase 2
+  # invariants (S-03 / E-01 / E-06) want a longer-lived slot to scrutinize;
+  # Phase 1 only needs the slower cron to broaden snapshot coverage, so
+  # reusing `test-echo` is fine here too.
+  long:
+    template: local:test-echo
+    resources:
+      cpu: "1"
+      memory: "1g"
+    schedules:
+      - name: long-task
+        cron: "*/5 * * * *"  # every 5 min
+        message: "long-task ping"
+        timezone: UTC
+        description: Slower cadence to overlap slots across canary cycles (Phase 2 will swap in a real long task)
+
+# No cross-agent permissions — the canary fleet observes the orchestration
+# layer, not each other.
+permissions:
+  preset: none
