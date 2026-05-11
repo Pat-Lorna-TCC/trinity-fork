@@ -25,6 +25,27 @@ def _client():
     return docker.from_env()
 
 
+@pytest.fixture
+def backend_password() -> str:
+    """Return the Redis ACL backend-user password, or skip if unset.
+
+    Issue #764: the session-scoped autouse fixture in `conftest.py` already
+    skips when this env var is missing, but only when ``.env`` is absent
+    AND nothing exported the value. A per-test fixture here makes the
+    requirement explicit at the call site and provides a clearer skip
+    reason in pytest output. Contributors who don't run the security tests
+    against a live stack see "skipped: REDIS_BACKEND_PASSWORD not set"
+    instead of a hard ``KeyError``.
+    """
+    pwd = os.environ.get("REDIS_BACKEND_PASSWORD")
+    if not pwd:
+        pytest.skip(
+            "REDIS_BACKEND_PASSWORD not set; "
+            "platform-network ACL test requires a running stack — see tests/security/README.md"
+        )
+    return pwd
+
+
 @pytest.mark.integration
 def test_agent_network_container_cannot_reach_redis():
     """Acceptance #3: a container on the agent network has no route to Redis."""
@@ -58,17 +79,16 @@ def test_redis_rejects_unauthenticated_connection():
 
 
 @pytest.mark.integration
-def test_platform_container_can_authenticate():
+def test_platform_container_can_authenticate(backend_password):
     """Sanity: the backend connection string works."""
     client = _client()
-    pwd = os.environ["REDIS_BACKEND_PASSWORD"]
     out = client.containers.run(
         "redis:7-alpine",
         command=[
             "redis-cli",
             "-h", "redis",
             "--user", "backend",
-            "-a", pwd,
+            "-a", backend_password,
             "--no-auth-warning",
             "PING",
         ],
@@ -79,17 +99,16 @@ def test_platform_container_can_authenticate():
 
 
 @pytest.mark.integration
-def test_backend_acl_blocks_flushall():
+def test_backend_acl_blocks_flushall(backend_password):
     """Acceptance #2: backend ACL user cannot wipe data."""
     client = _client()
-    pwd = os.environ["REDIS_BACKEND_PASSWORD"]
     out = client.containers.run(
         "redis:7-alpine",
         command=[
             "redis-cli",
             "-h", "redis",
             "--user", "backend",
-            "-a", pwd,
+            "-a", backend_password,
             "--no-auth-warning",
             "FLUSHALL",
         ],
@@ -100,17 +119,16 @@ def test_backend_acl_blocks_flushall():
 
 
 @pytest.mark.integration
-def test_backend_acl_blocks_config_get():
+def test_backend_acl_blocks_config_get(backend_password):
     """Acceptance #2: backend ACL user cannot read CONFIG (would leak admin password)."""
     client = _client()
-    pwd = os.environ["REDIS_BACKEND_PASSWORD"]
     out = client.containers.run(
         "redis:7-alpine",
         command=[
             "redis-cli",
             "-h", "redis",
             "--user", "backend",
-            "-a", pwd,
+            "-a", backend_password,
             "--no-auth-warning",
             "CONFIG", "GET", "requirepass",
         ],
