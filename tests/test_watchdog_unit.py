@@ -987,15 +987,21 @@ class TestProcessStaleSlotReclaims:
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
-    def test_skips_when_agent_unreachable(self, mock_db, mock_httpx):
-        """Re-verify returns None (agent unreachable) → skip this cycle.
-        Phase 1's 120-min stale cleanup is the backstop for truly stuck
-        agents — we do NOT maintain cross-cycle defer state because
-        cleanup_stale_slots removes reclaimed IDs from Redis permanently."""
+    def test_force_fails_when_agent_unreachable(self, mock_db, mock_httpx):
+        """Re-verify returns None (agent unreachable) → force-fail via the
+        race-guarded writer (#497). The slot was reclaimed by TTL, so the
+        execution is by definition older than ``timeout + buffer``; waiting
+        for Phase 1's 120-min stale cleanup was leaving zombie `running`
+        rows for up to 2 hours under sustained partial-outage.
+
+        Race safety is preserved via ``fail_stale_slot_execution``'s
+        ``WHERE status='running'`` guard — a real terminal write that
+        landed between the slot reclaim and this cleanup write wins."""
         mock_httpx.return_value.__aenter__ = AsyncMock(
             return_value=AsyncMock()
         )
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_db.fail_stale_slot_execution.return_value = True
 
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value=None)
@@ -1006,9 +1012,15 @@ class TestProcessStaleSlotReclaims:
 
         asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
 
-        mock_db.fail_stale_slot_execution.assert_not_called()
+        # Force-fail must fire; terminate is skipped (agent unreachable
+        # → we can't talk to it anyway).
+        mock_db.fail_stale_slot_execution.assert_called_once()
+        call_kwargs = mock_db.fail_stale_slot_execution.call_args.kwargs
+        assert call_kwargs["execution_id"] == "exec-1"
+        err = call_kwargs["error"].lower()
+        assert "unresponsive" in err or "unreachable" in err
         service._terminate_on_agent.assert_not_called()
-        assert report.stale_slot_executions == 0
+        assert report.stale_slot_executions == 1
 
     @patch("services.cleanup_service.httpx.AsyncClient")
     @patch("services.cleanup_service.db")
@@ -1074,8 +1086,9 @@ class TestProcessStaleSlotReclaims:
     @patch("services.cleanup_service.db")
     def test_one_agent_raises_others_proceed(self, mock_db, mock_httpx):
         """One agent's re-verify raises → asyncio.gather(return_exceptions=True)
-        captures it → that agent's execs are skipped as unreachable;
-        other agents proceed normally."""
+        captures it → per-agent error isolation. The raising agent's execs
+        are force-failed via the unreachable branch (#497); other agents'
+        execs follow the standard re-verify path."""
         mock_httpx.return_value.__aenter__ = AsyncMock(
             return_value=AsyncMock()
         )
@@ -1098,7 +1111,12 @@ class TestProcessStaleSlotReclaims:
 
         asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
 
-        # Only agent-b's exec was failed; agent-a treated as unreachable
-        mock_db.fail_stale_slot_execution.assert_called_once()
-        assert mock_db.fail_stale_slot_execution.call_args.kwargs["execution_id"] == "exec-b1"
-        assert report.stale_slot_executions == 1
+        # Both execs failed: exec-a1 via the unreachable branch (#497),
+        # exec-b1 via the standard re-verify-says-inactive branch.
+        assert mock_db.fail_stale_slot_execution.call_count == 2
+        failed_ids = {
+            call.kwargs["execution_id"]
+            for call in mock_db.fail_stale_slot_execution.call_args_list
+        }
+        assert failed_ids == {"exec-a1", "exec-b1"}
+        assert report.stale_slot_executions == 2

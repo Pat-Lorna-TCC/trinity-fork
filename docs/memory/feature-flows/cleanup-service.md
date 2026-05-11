@@ -201,11 +201,13 @@ Replaces the inline Phase 3 loop. Extracted as its own method for direct unit te
 | Phase 0 said running? | Re-verify says? | Action |
 |---|---|---|
 | Yes (`confirmed_running_ids`) | — | **SKIP** (trust Phase 0, save an HTTP call) |
-| No | Agent unreachable (None) | **SKIP this cycle** — Phase 1 (120-min stale cleanup) is the backstop |
+| No | Agent unreachable (None) | **FAIL** — race-guarded `fail_stale_slot_execution` with `"Stale execution — agent '{name}' unresponsive during cleanup re-verify, slot TTL expired (#497)"`. Slot was reclaimed by TTL, so the execution is by construction older than `timeout + buffer`; the race guard (`WHERE status='running'`) preserves any SUCCESS that landed between slot reclaim and this write. (#497) |
 | No | Agent says still running | **SKIP** — #378 race closed; agent's own SUCCESS write will land correctly |
 | No | Agent says not running | **FAIL** — terminate (best-effort, #61) + `fail_stale_slot_execution` with phantom-stale error |
 
-4. **No cross-cycle state** — `slot_service.cleanup_stale_slots` removes reclaimed IDs from Redis permanently (`zremrangebyscore`), so a deferred ID cannot reappear in a later cycle's `reclaimed` dict. Any "retry on next cycle" state machine would be dead code. Transiently-unreachable agents are caught by Phase 0's orphan recovery on subsequent cycles (when the agent becomes reachable again) and by Phase 1's 120-min stale cleanup as a final backstop.
+4. **No cross-cycle state** — `slot_service.cleanup_stale_slots` removes reclaimed IDs from Redis permanently (`zremrangebyscore`), so a deferred ID cannot reappear in a later cycle's `reclaimed` dict. Any "retry on next cycle" state machine would be dead code. Transiently-unreachable agents now fail immediately (#497) — the prior "wait for Phase 1's 120-min backstop" path produced zombie `running` rows that polluted dashboards under sustained partial-outage.
+
+5. **Residual flicker risk (#497, documented)** — if a force-failed execution's agent later recovers and writes SUCCESS via `update_execution_status`, that path overwrites FAILED per #378's "SUCCESS wins over FAILED" rule. The execution must have run past `timeout + buffer` for its slot to be reclaimed, so this represents a deliverable that exceeded its budget. Follow-up: narrow the SUCCESS-over-FAILED rule to exclude FAILED rows tagged with the cleanup marker if this ever becomes a real operator complaint.
 
 #### Residual-race observability
 
@@ -451,7 +453,8 @@ WHERE id = ?
 
 | Error Case | Handling | Impact |
 |------------|----------|--------|
-| Watchdog agent unreachable | Skipped, retry next cycle | No false positives |
+| Phase 0 watchdog agent unreachable | Skipped, retry next cycle | No false positives |
+| Phase 3 re-verify agent unreachable | Force-fail via race-guarded writer (#497) | Bounded zombie window; agent recovery + SUCCESS still wins per #378 rule (documented risk) |
 | Watchdog single recovery fails | Per-execution try/except, continues | Other recoveries unaffected |
 | Watchdog >50% recoveries fail | WARNING log (systemic failure) | Operator alerted |
 | Watchdog terminate fails on agent | Logged, DB/capacity still cleaned | Zombie process may linger |

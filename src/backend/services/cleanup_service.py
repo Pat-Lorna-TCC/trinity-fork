@@ -412,11 +412,13 @@ class CleanupService:
           FAILED, closing the window between Phase 0 and Phase 3.
         - Parallel fan-out via asyncio.gather (mirrors Phase 0 pattern at
           _reconcile_orphaned_executions).
-        - On agent unreachable: skip this cycle. Do NOT accumulate cross-cycle
-          state — slot_service.cleanup_stale_slots removes reclaimed IDs from
-          Redis permanently, so the same ID will not reappear in a later
-          cycle. The 120-min Phase 1 stale cleanup is the backstop for truly
-          stuck agents.
+        - On agent unreachable (#497): force-fail via the race-guarded
+          `fail_stale_slot_execution`. The slot was reclaimed by TTL, so
+          the execution is by construction older than `timeout + buffer`.
+          Waiting for the 120-min Phase 1 stale cleanup was leaving DB
+          rows as zombie `running` for up to 2 hours under sustained
+          partial-outage conditions. The race guard preserves any
+          SUCCESS that arrived between slot reclaim and this write.
         """
         if not reclaimed:
             return
@@ -453,13 +455,57 @@ class CleanupService:
 
                     # Just-in-time re-verify interpretation
                     if running_ids is None:
-                        # Agent unreachable during re-verify. Skip this cycle;
-                        # Phase 1 (120-min stale cleanup) is the backstop.
-                        logger.info(
-                            f"[Cleanup] Skipping {execution_id} for '{agent_name}' "
-                            f"— agent unreachable during re-verify (#378); "
-                            f"Phase 1 stale cleanup is fallback"
-                        )
+                        # Agent unreachable during re-verify (#497).
+                        #
+                        # The slot was already reclaimed by TTL — by
+                        # construction the execution is older than
+                        # `timeout_seconds + buffer`, which is Phase 1's
+                        # criterion at a much shorter window. Force-fail
+                        # via the race-guarded writer instead of waiting
+                        # the full 120-min Phase 1 stale-cleanup deadline.
+                        #
+                        # Race safety: `fail_stale_slot_execution` has a
+                        # `WHERE status='running'` guard, so a SUCCESS
+                        # that landed between the slot reclaim and this
+                        # write is preserved.
+                        #
+                        # Documented residual risk: if the agent later
+                        # recovers and writes SUCCESS via
+                        # `update_execution_status`, that path overwrites
+                        # FAILED per #378's design. The execution must
+                        # have run past its configured `timeout + buffer`
+                        # for the slot to be reclaimed in the first
+                        # place, so a "late SUCCESS" here represents a
+                        # deliverable that exceeded its budget.
+                        try:
+                            updated = db.fail_stale_slot_execution(
+                                execution_id=execution_id,
+                                error=(
+                                    f"Stale execution — agent '{agent_name}' "
+                                    f"unresponsive during cleanup re-verify, "
+                                    f"slot TTL expired (#497)"
+                                ),
+                            )
+                            if updated:
+                                report.stale_slot_executions += 1
+                                logger.info(
+                                    f"[Cleanup] Failed execution {execution_id} for "
+                                    f"agent '{agent_name}' "
+                                    f"(slot reclaimed, agent unreachable during re-verify)"
+                                )
+                            else:
+                                # Race-guard refused — a real terminal write
+                                # arrived first. Expected and benign.
+                                logger.debug(
+                                    f"[Cleanup] fail_stale_slot_execution declined "
+                                    f"for {execution_id} on '{agent_name}' "
+                                    f"(race-guard — already terminal)"
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"[Cleanup] Error failing {execution_id} after slot "
+                                f"reclaim (unreachable branch): {e}"
+                            )
                         continue
 
                     if execution_id in running_ids:
