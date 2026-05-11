@@ -29,6 +29,7 @@ import httpx
 from database import db
 from models import ActivityState, ActivityType, TaskExecutionStatus
 from services.activity_service import activity_service
+from services.agent_client import CircuitState
 from services.capacity_manager import CapacityFull, get_capacity_manager
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
 from services.platform_prompt_service import (
@@ -58,6 +59,7 @@ class TaskExecutionErrorCode(str, Enum):
     BILLING = "billing"             # Rate limit, credit, or billing issue
     AGENT_ERROR = "agent_error"     # Agent returned non-zero exit code
     NETWORK = "network"             # HTTP/connection error to agent container
+    CIRCUIT_OPEN = "circuit_open"   # Circuit breaker open — agent known unhealthy (#767)
 
 
 @dataclass
@@ -366,7 +368,37 @@ class TaskExecutionService:
                 )
             except Exception as e:
                 logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
-            # ---- 3b. Mark execution as dispatched ---------------------------
+            # ---- 3b. Circuit breaker fast-fail (precursor to #526) ----------
+            # Check the per-agent circuit breaker before marking dispatched.
+            # If the CB is open the agent is known-unhealthy; close the record
+            # immediately rather than letting it hang until cleanup (120 min).
+            circuit = CircuitState(agent_name)
+            if not circuit.allow_request():
+                error_msg = "Agent circuit breaker open — agent is unhealthy"
+                logger.warning(f"[TaskExecService] CB open, fast-failing execution {execution_id} for {agent_name}")
+                if execution_id:
+                    existing = db.get_execution(execution_id)
+                    if not existing or existing.status != TaskExecutionStatus.CANCELLED:
+                        db.update_execution_status(
+                            execution_id=execution_id,
+                            status=TaskExecutionStatus.FAILED,
+                            error=error_msg,
+                        )
+                if activity_id:
+                    await activity_service.complete_activity(
+                        activity_id=activity_id,
+                        status=ActivityState.FAILED,
+                        error=error_msg,
+                    )
+                return TaskExecutionResult(
+                    execution_id=execution_id or "",
+                    status=TaskExecutionStatus.FAILED,
+                    response="",
+                    error=error_msg,
+                    error_code=TaskExecutionErrorCode.CIRCUIT_OPEN,
+                )
+
+            # ---- 3c. Mark execution as dispatched ---------------------------
             # Set claude_session_id='dispatched' BEFORE calling the agent so
             # the no-session cleanup doesn't falsely mark long-running executions
             # as "Silent launch failure". Only truly orphaned executions (where
@@ -654,6 +686,27 @@ class TaskExecutionService:
                 response="",
                 error=error_msg,
             )
+
+        except asyncio.CancelledError:
+            # Python 3.11+: CancelledError is BaseException, bypasses except Exception.
+            # On backend shutdown, background tasks are cancelled; close the record
+            # immediately so cleanup_service doesn't inflate duration (#767).
+            if execution_id:
+                try:
+                    existing = db.get_execution(execution_id)
+                    if existing and existing.status not in (
+                        TaskExecutionStatus.SUCCESS,
+                        TaskExecutionStatus.FAILED,
+                        TaskExecutionStatus.CANCELLED,
+                    ):
+                        db.update_execution_status(
+                            execution_id=execution_id,
+                            status=TaskExecutionStatus.FAILED,
+                            error="Execution cancelled (backend shutdown)",
+                        )
+                except Exception:
+                    pass
+            raise
 
         finally:
             # ---- 8. Release slot (only if acquired) ----------------------

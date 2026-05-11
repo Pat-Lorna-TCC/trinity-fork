@@ -486,6 +486,17 @@
         "backend",
         "git"
       ]
+    },
+    {
+      "file": "test_cb_probe_execution_close.py",
+      "feature": "#767",
+      "added": "2026-05-11",
+      "categories": [
+        "unit",
+        "backend",
+        "executions",
+        "circuit-breaker"
+      ]
     }
   ]
 }
