@@ -297,6 +297,7 @@ CREATE TABLE IF NOT EXISTS agent_sharing (
     shared_with_email TEXT NOT NULL,
     shared_by_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    allow_proactive INTEGER DEFAULT 0,    -- proactive-toggle (Issue #376)
     UNIQUE(agent_name, shared_with_email),
     FOREIGN KEY (shared_by_id) REFERENCES users(id)
 )

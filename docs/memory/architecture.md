@@ -857,14 +857,33 @@ CREATE TABLE users (
 **agent_ownership:**
 ```sql
 CREATE TABLE agent_ownership (
-    agent_name TEXT PRIMARY KEY,
-    owner_id TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT UNIQUE NOT NULL,
+    owner_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    is_system INTEGER DEFAULT 0,
+    use_platform_api_key INTEGER DEFAULT 1,
+    autonomy_enabled INTEGER DEFAULT 0,
+    memory_limit TEXT,
+    cpu_limit TEXT,
+    full_capabilities INTEGER DEFAULT 0,
+    read_only_mode INTEGER DEFAULT 0,
+    read_only_config TEXT,
+    subscription_id TEXT,
     max_parallel_tasks INTEGER DEFAULT 3,          -- CAPACITY-001
     execution_timeout_seconds INTEGER DEFAULT 900, -- TIMEOUT-001 (15 min)
-    require_email INTEGER DEFAULT 0,               -- #311: gate channels on verified email
-    open_access INTEGER DEFAULT 0,                 -- #311: anyone with verified email can chat
-    FOREIGN KEY (owner_id) REFERENCES users(id)
+    avatar_identity_prompt TEXT,
+    avatar_updated_at TEXT,
+    is_default_avatar INTEGER DEFAULT 0,
+    require_email INTEGER DEFAULT 0,               -- #311
+    open_access INTEGER DEFAULT 0,                 -- #311
+    max_backlog_depth INTEGER DEFAULT 50,          -- BACKLOG-001
+    group_auth_mode TEXT DEFAULT 'none',
+    voice_system_prompt TEXT,
+    guardrails_config TEXT,
+    file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
+    FOREIGN KEY (owner_id) REFERENCES users(id),
+    FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
 );
 ```
 
@@ -874,8 +893,9 @@ CREATE TABLE agent_sharing (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_name TEXT NOT NULL,
     shared_with_email TEXT NOT NULL,
-    shared_by_id TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    shared_by_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    allow_proactive INTEGER DEFAULT 0,
     UNIQUE(agent_name, shared_with_email),
     FOREIGN KEY (shared_by_id) REFERENCES users(id)
 );
@@ -913,12 +933,17 @@ ALTER TABLE telegram_chat_links ADD COLUMN verified_at TEXT;
 ```sql
 CREATE TABLE mcp_api_keys (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    key_hash TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_used TIMESTAMP,
-    use_count INTEGER DEFAULT 0,
+    description TEXT,
+    key_prefix TEXT NOT NULL,
+    key_hash TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    usage_count INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    user_id INTEGER NOT NULL,
+    agent_name TEXT,                 -- non-null for agent-scoped keys
+    scope TEXT DEFAULT 'user',       -- user | agent | system
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 ```

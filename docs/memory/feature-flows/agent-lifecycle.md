@@ -620,13 +620,14 @@ def get_all_agent_metadata(self, user_email: str = None):
 
 ### Tables
 
-**agent_ownership**
+**agent_ownership** (summary — full DDL in `src/backend/db/schema.py:67-97` / `architecture.md`)
 ```sql
 CREATE TABLE agent_ownership (
     id INTEGER PRIMARY KEY,
     agent_name TEXT UNIQUE,
     owner_id INTEGER REFERENCES users(id),
-    created_at TEXT
+    created_at TEXT,
+    ...
 )
 ```
 
@@ -652,15 +653,19 @@ CREATE TABLE agent_git_configs (
 )
 ```
 
-**agent_mcp_api_keys** (Agent-to-Agent collaboration)
+**mcp_api_keys** (Agent-to-Agent collaboration — same table as user keys; rows are scoped by `scope` and `agent_name`)
 ```sql
-CREATE TABLE agent_mcp_api_keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_name TEXT UNIQUE NOT NULL,
-    api_key TEXT UNIQUE NOT NULL,
+CREATE TABLE mcp_api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    key_hash TEXT UNIQUE NOT NULL,
+    user_id INTEGER NOT NULL,
+    agent_name TEXT,                 -- set for agent-scoped rows
+    scope TEXT DEFAULT 'user',       -- 'user' | 'agent' | 'system'
     ...
 )
 ```
+Auto-generated on agent creation with `scope='agent'`, `agent_name=<this agent>`, owned by the creating user. Full DDL in `src/backend/db/schema.py:115-131` / `architecture.md`.
 
 ### Operations (`src/backend/db/agents.py`)
 
