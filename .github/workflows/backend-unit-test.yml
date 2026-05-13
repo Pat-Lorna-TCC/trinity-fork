@@ -8,11 +8,19 @@ name: backend-unit-test
 # any new failing test ID that was not failing in `base` under any seed, or
 # if any pytest run produced no JUnit XML (fail-closed on infra failure).
 #
+# Issue #802: also runs on push to dev/main so baseline-style invariant checks
+# (lint-sys-modules) fire post-merge — catches the case where two PRs both
+# pass their pre-merge CI but the merge of one invalidates the baseline the
+# other landed. The per-PR diff jobs (test, diff) only run on pull_request
+# since there's no base/head to compare on a push.
+#
 # Trigger manually via the Actions tab (workflow_dispatch) for backfill.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    branches: [dev, main]
+  push:
     branches: [dev, main]
   workflow_dispatch:
 
@@ -45,6 +53,8 @@ jobs:
 
   test:
     name: pytest (${{ matrix.side }}, seed ${{ matrix.seed }})
+    # Per-PR diff job — no base/head exists on a push, so skip there.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -114,7 +124,8 @@ jobs:
   diff:
     name: regression diff
     needs: test
-    if: always()
+    # Mirror the `test` gate — diff is meaningless without base/head artifacts.
+    if: always() && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
