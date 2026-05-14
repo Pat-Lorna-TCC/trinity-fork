@@ -1,0 +1,183 @@
+"""
+Unit tests for the local-templates listing (#843).
+
+The list endpoint at `routers/templates.py` defers to
+`services/template_service.py::get_local_templates()` and
+`get_local_template()`. Tests load template_service standalone (no
+backend deps) and exercise the local-template scan against a
+temporary directory shaped like `config/agent-templates/`.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+
+
+def _load_template_service(monkeypatch, fake_templates_dir: Path):
+    """Load template_service.py and redirect `_local_templates_dir`
+    to point at our fixture instead of `/agent-configs/templates`."""
+    # Backend pulls `config` at import-time. Stub via monkeypatch.setitem
+    # (not bare `sys.modules[...]=` — would trip tests/lint_sys_modules.py
+    # baseline check). monkeypatch undoes the insertion on test teardown.
+    if "config" not in sys.modules:
+        import types
+        config_mod = types.ModuleType("config")
+        config_mod.DEFAULT_GITHUB_TEMPLATE_REPOS = []
+        config_mod.GITHUB_PAT_CREDENTIAL_ID = "test-pat"
+        monkeypatch.setitem(sys.modules, "config", config_mod)
+
+    spec = importlib.util.spec_from_file_location(
+        "ts_under_test", _BACKEND / "services" / "template_service.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_local_templates_dir", lambda: fake_templates_dir)
+    return module
+
+
+def _seed_template(parent: Path, name: str, body: str | None = None) -> Path:
+    """Create a fake local-template directory with template.yaml."""
+    tdir = parent / name
+    tdir.mkdir(parents=True)
+    if body is not None:
+        (tdir / "template.yaml").write_text(body)
+    return tdir
+
+
+# -----------------------------------------------------------------------------
+# get_local_templates
+# -----------------------------------------------------------------------------
+
+def test_lists_templates_with_template_yaml(tmp_path, monkeypatch):
+    """A directory with a parseable template.yaml is listed."""
+    _seed_template(tmp_path, "dd-compliance", body="""
+name: dd-compliance
+display_name: DD Compliance Agent
+description: Regulatory and compliance analysis
+capabilities:
+  - regulatory-research
+  - compliance-assessment
+use_cases:
+  - Assess regulation
+""")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    templates = ts.get_local_templates()
+    assert len(templates) == 1
+    t = templates[0]
+    assert t["id"] == "local:dd-compliance"
+    assert t["display_name"] == "DD Compliance Agent"
+    assert t["description"] == "Regulatory and compliance analysis"
+    assert t["source"] == "local"
+    assert t["capabilities"] == ["regulatory-research", "compliance-assessment"]
+    assert t["use_cases"] == ["Assess regulation"]
+
+
+def test_skips_directories_without_template_yaml(tmp_path, monkeypatch):
+    """Directories under templates/ that lack template.yaml are silently
+    skipped — they're not Trinity templates."""
+    _seed_template(tmp_path, "no-yaml")  # no template.yaml
+    _seed_template(tmp_path, "real-one", body="name: real-one\ndisplay_name: Real")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    templates = ts.get_local_templates()
+    ids = {t["id"] for t in templates}
+    assert ids == {"local:real-one"}
+
+
+def test_skips_unparseable_yaml(tmp_path, monkeypatch):
+    """Templates with broken YAML are logged and skipped, not surfaced as
+    half-formed entries — better to omit than confuse the UI."""
+    _seed_template(tmp_path, "broken", body="name: [unclosed bracket")
+    _seed_template(tmp_path, "ok", body="name: ok\ndisplay_name: OK")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    templates = ts.get_local_templates()
+    ids = {t["id"] for t in templates}
+    assert ids == {"local:ok"}
+
+
+def test_returns_empty_when_dir_missing(tmp_path, monkeypatch):
+    """Pointing at a nonexistent directory returns [] rather than
+    raising — Trinity ships without the dir on some installs."""
+    ts = _load_template_service(monkeypatch, tmp_path / "does-not-exist")
+    assert ts.get_local_templates() == []
+
+
+def test_skips_files_only_dirs(tmp_path, monkeypatch):
+    """A plain file at the root (not a directory) shouldn't be treated
+    as a template."""
+    (tmp_path / "readme.md").write_text("not a template")
+    _seed_template(tmp_path, "real", body="name: real")
+    ts = _load_template_service(monkeypatch, tmp_path)
+    ids = {t["id"] for t in ts.get_local_templates()}
+    assert ids == {"local:real"}
+
+
+def test_results_sorted_by_directory_name(tmp_path, monkeypatch):
+    """Stable order is alphabetical by directory name — the list endpoint
+    re-sorts by display_name, but the underlying scan should be
+    deterministic."""
+    _seed_template(tmp_path, "zebra", body="name: zebra")
+    _seed_template(tmp_path, "alpha", body="name: alpha")
+    _seed_template(tmp_path, "middle", body="name: middle")
+    ts = _load_template_service(monkeypatch, tmp_path)
+    ids = [t["id"] for t in ts.get_local_templates()]
+    assert ids == ["local:alpha", "local:middle", "local:zebra"]
+
+
+# -----------------------------------------------------------------------------
+# get_local_template (single by id)
+# -----------------------------------------------------------------------------
+
+def test_get_single_local_template(tmp_path, monkeypatch):
+    _seed_template(tmp_path, "x", body="name: x\ndisplay_name: X Agent")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    t = ts.get_local_template("local:x")
+    assert t is not None
+    assert t["id"] == "local:x"
+    assert t["display_name"] == "X Agent"
+
+
+def test_get_local_template_returns_none_for_unknown(tmp_path, monkeypatch):
+    ts = _load_template_service(monkeypatch, tmp_path)
+    assert ts.get_local_template("local:nonexistent") is None
+
+
+def test_get_local_template_rejects_wrong_prefix(tmp_path, monkeypatch):
+    """A `github:` id passed to the local helper must return None
+    rather than scanning the local dir for a same-named directory."""
+    _seed_template(tmp_path, "x", body="name: x")
+    ts = _load_template_service(monkeypatch, tmp_path)
+    assert ts.get_local_template("github:org/x") is None
+    assert ts.get_local_template("x") is None  # unprefixed
+
+
+# -----------------------------------------------------------------------------
+# Display fallbacks
+# -----------------------------------------------------------------------------
+
+def test_display_name_falls_back_to_name_then_dirname(tmp_path, monkeypatch):
+    # No display_name, but has `name`
+    _seed_template(tmp_path, "fallback-a", body="name: yaml-name-only")
+    # Neither — pure dir name
+    _seed_template(tmp_path, "fallback-b", body="description: just a desc")
+    ts = _load_template_service(monkeypatch, tmp_path)
+    by_id = {t["id"]: t for t in ts.get_local_templates()}
+    assert by_id["local:fallback-a"]["display_name"] == "yaml-name-only"
+    assert by_id["local:fallback-b"]["display_name"] == "fallback-b"
+
+
+def test_description_falls_back_to_tagline(tmp_path, monkeypatch):
+    _seed_template(tmp_path, "x", body="name: x\ntagline: punchy line")
+    ts = _load_template_service(monkeypatch, tmp_path)
+    t = ts.get_local_templates()[0]
+    assert t["description"] == "punchy line"

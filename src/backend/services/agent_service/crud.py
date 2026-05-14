@@ -127,6 +127,26 @@ async def create_agent_internal(
 
     # Load template configuration
     if config.template:
+        # #843: reject template strings that don't start with a known
+        # scheme. Pre-fix, an unprefixed name (e.g. "dd-compliance"
+        # instead of "local:dd-compliance") fell through every
+        # branch of the dispatch and silently produced a blank agent
+        # — same return code as success, no log warning, the operator
+        # only noticed when the agent had no template.yaml. Reject
+        # explicitly so the failure is loud.
+        if not (
+            config.template.startswith("github:")
+            or config.template.startswith("local:")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Template '{config.template}' must start with "
+                    f"'local:' (for templates under config/agent-templates/) "
+                    f"or 'github:' (for GitHub-hosted templates). "
+                    f"Example: 'local:{config.template}' or 'github:owner/repo'."
+                ),
+            )
         if config.template.startswith("github:"):
             # GIT-002: First, check if template URL contains @branch syntax
             # This applies to both pre-defined and dynamic templates

@@ -158,12 +158,107 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
 # Public API
 # ============================================================================
 
-def get_all_templates() -> List[dict]:
-    """Return the full resolved template list (DB-configured or defaults).
+def _local_templates_dir() -> Path:
+    """Return the canonical local-templates directory.
 
-    Fetches metadata from GitHub for each repo (cached).
+    Production path is the read-only bind mount at
+    `/agent-configs/templates` (set up by docker-compose). When running
+    outside the container, fall back to the in-repo path so the function
+    still works in tests and dev shells. (#843)
+    """
+    inside_container = Path("/agent-configs/templates")
+    if inside_container.exists():
+        return inside_container
+    return Path(__file__).resolve().parent.parent.parent.parent / "config" / "agent-templates"
+
+
+def _build_local_template(template_dir: Path) -> Optional[dict]:
+    """Build a template-list entry from a local-template directory.
+
+    Returns None if the directory doesn't contain a readable
+    `template.yaml`. Shape mirrors `_build_template` so the frontend's
+    rendering code (CreateAgentModal.vue:117) works without a
+    per-source branch.
+    """
+    template_yaml = template_dir / "template.yaml"
+    if not template_yaml.exists():
+        return None
+
+    try:
+        with open(template_yaml) as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as e:
+        logger.warning("Failed to parse local template %s: %s", template_dir.name, e)
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    name = template_dir.name
+    return {
+        "id": f"local:{name}",
+        "display_name": data.get("display_name") or data.get("name") or name,
+        "description": data.get("description") or data.get("tagline") or "",
+        "source": "local",
+        "resources": data.get("resources", {"cpu": "2", "memory": "4g"}),
+        "skills": data.get("skills", []),
+        "mcp_servers": list(data.get("credentials", {}).get("mcp_servers", {}).keys())
+            or data.get("mcp_servers", []),
+        "required_credentials": data.get("required_credentials", []),
+        # Local templates surface their full capabilities/use-cases so the
+        # frontend can preview them without a second round-trip.
+        "capabilities": data.get("capabilities", []),
+        "use_cases": data.get("use_cases", []),
+    }
+
+
+def get_local_templates() -> List[dict]:
+    """Scan the local-templates directory and return entries for every
+    directory containing a parseable `template.yaml`.
+
+    Each entry has `id` prefixed `local:<dirname>` and shape matching
+    `_build_template` (the GitHub-template builder) so the frontend
+    handles both sources identically. (#843)
+    """
+    templates_dir = _local_templates_dir()
+    if not templates_dir.exists():
+        return []
+
+    out: List[dict] = []
+    for child in sorted(templates_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        entry = _build_local_template(child)
+        if entry is not None:
+            out.append(entry)
+    return out
+
+
+def get_local_template(template_id: str) -> Optional[dict]:
+    """Get a single local template by `local:<name>` id."""
+    if not template_id.startswith("local:"):
+        return None
+    name = template_id[len("local:"):]
+    template_dir = _local_templates_dir() / name
+    if not template_dir.is_dir():
+        return None
+    return _build_local_template(template_dir)
+
+
+def get_all_templates() -> List[dict]:
+    """Return the full resolved template list — local + GitHub-configured.
+
+    Local templates (under `config/agent-templates/`) come first; they
+    don't require network access and are always available. GitHub
+    metadata is fetched per repo (cached, 10-min TTL).
+
+    Issue #843: local templates were silently omitted before this PR,
+    so the frontend's "Local templates" section in CreateAgentModal
+    rendered empty even when local templates existed on disk.
     """
     from services.settings_service import get_github_templates
+
+    local = get_local_templates()
 
     db_entries = get_github_templates()
 
@@ -171,17 +266,19 @@ def get_all_templates() -> List[dict]:
         # Admin-configured list
         repos = [e["github_repo"] for e in db_entries]
         all_metadata = _fetch_all_metadata(repos)
-        return [
+        github = [
             _build_template(e["github_repo"], all_metadata.get(e["github_repo"], {}), e)
             for e in db_entries
         ]
     else:
         # Defaults
         all_metadata = _fetch_all_metadata(DEFAULT_GITHUB_TEMPLATE_REPOS)
-        return [
+        github = [
             _build_template(repo, all_metadata.get(repo, {}))
             for repo in DEFAULT_GITHUB_TEMPLATE_REPOS
         ]
+
+    return local + github
 
 
 def get_github_template(template_id: str) -> Optional[dict]:
