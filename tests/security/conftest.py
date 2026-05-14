@@ -17,12 +17,21 @@ except ImportError:  # pragma: no cover
 
 @pytest.fixture(scope="session", autouse=True)
 def _load_redis_env():
+    # tests/conftest.py setdefaults REDIS_PASSWORD/REDIS_BACKEND_PASSWORD to the
+    # literal "test" at global pytest import so backend modules can be imported
+    # without real Redis creds. That sentinel must be cleared here before we
+    # overlay real values from .env, otherwise setdefault is a no-op and the
+    # skip-guard below sees "test" and lets the suite run with wrong creds (#804).
+    for key in ("REDIS_PASSWORD", "REDIS_BACKEND_PASSWORD"):
+        if os.environ.get(key) == "test":
+            del os.environ[key]
+
     if dotenv_values is not None:
         env_path = Path(__file__).resolve().parents[2] / ".env"
         if env_path.exists():
             for key, value in dotenv_values(env_path).items():
                 if key in {"REDIS_PASSWORD", "REDIS_BACKEND_PASSWORD"} and value:
-                    os.environ.setdefault(key, value)
+                    os.environ[key] = value
 
     for required in ("REDIS_PASSWORD", "REDIS_BACKEND_PASSWORD"):
         if required not in os.environ or not os.environ[required]:
