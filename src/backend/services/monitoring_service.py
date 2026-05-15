@@ -775,21 +775,62 @@ class MonitoringService:
             await asyncio.sleep(self.config.docker_check_interval)
 
     async def _run_check_cycle(self):
-        """Run one cycle of health checks for all agents."""
+        """Run one cycle of health checks for every Trinity agent.
+
+        #675: this previously filtered to ``status == "running"`` only.
+        A stopped / exited / crashed agent was excluded from every
+        cycle, so its ``agent_health_checks`` row never refreshed —
+        production showed agents stale for *months* (last refresh
+        2026-02-23..04-28) while the one running agent stayed fresh.
+        That is precisely backwards: a down agent is the case
+        monitoring most needs to surface. `perform_health_check`
+        already produces a correct "docker exited / unreachable →
+        unhealthy" record for a stopped agent (and the #631 dormant
+        short-circuit bounds cost for hard-down agents), so we now
+        check the whole fleet.
+
+        Note: `perform_fleet_health_check` is already per-agent
+        isolated via `asyncio.gather(..., return_exceptions=True)` +
+        per-result handling — issue hypothesis #1 (one agent's failure
+        short-circuits the fleet) did not hold; the bug was this
+        filter, not missing isolation.
+        """
         from services.docker_service import list_all_agents_fast
 
-        # Get list of running agents
+        # `list_all_agents_fast()` already passes `all=True`, so this
+        # includes stopped/exited/dead/created containers (normalised
+        # to status="stopped"). Check all of them.
         agents = list_all_agents_fast()
-        running_agents = [a.name for a in agents if a.status == "running"]
+        all_agent_names = [a.name for a in agents]
 
-        if not running_agents:
+        if not all_agent_names:
             return
 
+        running_count = sum(1 for a in agents if a.status == "running")
+        stopped_count = len(all_agent_names) - running_count
+        cycle_start = time.monotonic()
+
         # Perform health checks
-        await perform_fleet_health_check(
-            running_agents,
+        fleet = await perform_fleet_health_check(
+            all_agent_names,
             self.config,
             store_results=True
+        )
+
+        # #675 ask: one structured line per pass so a stalled / partial
+        # fleet check is observable next time instead of being inferred
+        # months later from stale rollups. Includes the agent count,
+        # running/stopped split, the aggregate-status breakdown, and
+        # wall-clock duration.
+        s = fleet.summary
+        logger.info(
+            "fleet_health_check pass complete: "
+            "agents=%d (running=%d stopped=%d) "
+            "healthy=%d degraded=%d unhealthy=%d critical=%d unknown=%d "
+            "duration_ms=%d",
+            len(all_agent_names), running_count, stopped_count,
+            s.healthy, s.degraded, s.unhealthy, s.critical, s.unknown,
+            int((time.monotonic() - cycle_start) * 1000),
         )
 
         # Cleanup old records periodically (every hour)
