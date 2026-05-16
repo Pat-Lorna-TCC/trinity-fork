@@ -16,10 +16,9 @@ from typing import Dict, Optional, List, AsyncIterator
 from threading import Lock
 
 from ..utils.subprocess_pgroup import (
-    EXECUTION_TAG_NAME,
-    kill_processes_by_env_tag,
     signal_process_tree as _signal_process_tree,
 )
+from ..utils.orphan_sweep import kill_cgroup_orphans
 
 logger = logging.getLogger(__name__)
 
@@ -147,23 +146,37 @@ class ProcessRegistry:
 
             returncode = process.returncode
 
-            # Issue #817: env-tag sweep for descendants that escaped the
-            # pgid kill via setsid + FD detachment. Best-effort — never
-            # fail termination on this. Mirrors the post-kill pass added
-            # to terminate_process_group; ProcessRegistry.terminate uses
-            # _signal_process_tree directly (different kill primitive)
-            # so we run the env-tag pass here too.
+            # Issue #817 follow-up: cgroup-walk sweep for descendants
+            # that escaped the pgid kill via setsid, FD detachment, or
+            # env stripping. Best-effort — never fail termination on
+            # this. Preserve every OTHER active execution by passing
+            # their PIDs/pgids as extra_pids so we don't kill them
+            # while terminating this one.
             try:
-                killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, execution_id)
+                preserve: list[int] = []
+                with self._lock:
+                    for other_id, other_entry in self._processes.items():
+                        if other_id == execution_id:
+                            continue
+                        other_proc = other_entry["process"]
+                        if other_proc.poll() is not None:
+                            continue
+                        preserve.append(other_proc.pid)
+                        other_pgid = (other_entry.get("metadata") or {}).get("pgid")
+                        if isinstance(other_pgid, int) and other_pgid > 0:
+                            preserve.append(other_pgid)
+                killed = kill_cgroup_orphans(extra_pids=preserve)
                 if killed:
                     logger.info(
-                        f"[ProcessRegistry] Killed {killed} env-tagged "
-                        f"orphan(s) for execution {execution_id} after pgid sweep"
+                        f"[ProcessRegistry] Cgroup sweep killed {killed} "
+                        f"orphan(s) after terminating {execution_id} "
+                        f"(preserved {len(preserve)} pid(s) for "
+                        f"{len(self._processes) - 1} other execution(s))"
                     )
             except Exception:
                 logger.exception(
-                    f"[ProcessRegistry] kill_processes_by_env_tag({execution_id}) "
-                    "raised — continuing termination"
+                    f"[ProcessRegistry] cgroup sweep raised after "
+                    f"terminating {execution_id} — continuing"
                 )
 
             with self._lock:
@@ -199,7 +212,14 @@ class ProcessRegistry:
             }
 
     def list_running(self) -> list:
-        """List all currently running executions."""
+        """List all currently running executions.
+
+        ``pid`` was added to the returned shape (#817 follow-up) so the
+        periodic orphan sweeper can preserve every active claude
+        process and its descendants. Existing callers that only read
+        ``execution_id`` / ``started_at`` / ``metadata`` are
+        unaffected.
+        """
         with self._lock:
             result = []
             for exec_id, entry in self._processes.items():
@@ -207,6 +227,7 @@ class ProcessRegistry:
                 if process.poll() is None:
                     result.append({
                         "execution_id": exec_id,
+                        "pid": process.pid,
                         "started_at": entry["started_at"].isoformat(),
                         "metadata": entry["metadata"]
                     })
