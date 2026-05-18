@@ -1,7 +1,9 @@
-# Feature: write_user_memory MCP Tool (MEM-001, #888)
+# Feature: write_user_memory MCP Tool (MEM-001, #888, #895)
 
 ## Overview
 Agents can persist per-user memory blobs scoped to a single (agent, user_email) pair. This replaces the unsafe pattern of writing to `~/.claude/projects/memory/`, which is shared across all users of an agent and leaks PII between sessions.
+
+**#895 update**: storage was split into two named sections so the agent-deliberate writes from this tool don't clobber the every-5-message conversation summarizer (and vice versa). The MCP wire format is unchanged — the tool still accepts a single `memory_text` field — but the backend now routes that value to the `agent_notes` section of the JSON blob stored on disk. Channel sessions (Slack/Telegram/WhatsApp) now also inject this memory into the agent's system prompt, gated on `verified_email and not is_group`.
 
 ## User Story
 As an agent serving multiple users via public link / Slack / Telegram / WhatsApp, I want to remember facts about each individual user (name, preferences, timezone) so that future sessions are personalized — without contaminating any other user's context.
@@ -52,13 +54,19 @@ The fix is a server-side gated write: the agent never supplies a user email. The
 3. **Execution ownership check** — `execution.agent_name != agent_name`: the execution must belong to the agent named in the path. Returns 403 if mismatch.
 4. **Channel gate** — `triggered_by` must be one of `{"public", "slack", "telegram", "whatsapp"}`. Scheduled tasks and agent-to-agent executions are rejected with 422.
 5. **Email extraction** — `execution.source_user_email` is read directly from the execution record. Agent never supplies this value. Returns 422 if missing or malformed.
-6. **Upsert** — `db.get_or_create_public_user_memory(agent_name, user_email)` then `db.update_public_user_memory(agent_name, user_email, memory_text)`.
+6. **Section write (#895)** — `db.update_public_user_memory_agent_notes(agent_name, user_email, memory_text)`. The helper reads the existing JSON blob, replaces only the `agent_notes` key, and writes back — `conversation_summary` (written by the background summarizer) is left untouched. The row is created on demand inside the helper.
 
 ### Database Operations
-- **Table**: `public_user_memory` (schema at `src/backend/db/schema.py:515`)
+- **Table**: `public_user_memory` (schema at `src/backend/db/schema.py:515`) — unchanged by #895
 - **Unique constraint**: `(agent_name, user_email)` — one blob per user per agent
-- **Read** (`db.get_or_create_public_user_memory`): `SELECT` by `(agent_name, user_email)`; `INSERT` if not found — `src/backend/db/public_links.py:509`
-- **Write** (`db.update_public_user_memory`): `UPDATE memory_text, updated_at` by `(agent_name, user_email)` — `src/backend/db/public_links.py:574`
+- **Storage shape (#895)**: `memory_text TEXT` now holds a JSON object with two named keys (no schema migration required):
+  ```json
+  { "agent_notes": "...", "conversation_summary": "..." }
+  ```
+  `agent_notes` is written by this tool. `conversation_summary` is written by the background summarizer (`services/platform_prompt_service.summarize_user_memory_background`). Legacy plaintext rows (written before #895) are transparently surfaced as `conversation_summary` on read — see `db/public_links._parse_memory_blob`.
+- **Read** (`db.get_or_create_public_user_memory`): `SELECT` by `(agent_name, user_email)`; `INSERT` if not found. Returns the parsed dict `{id, agent_name, user_email, agent_notes, conversation_summary, message_count, created_at, updated_at}` — `src/backend/db/public_links.py:get_or_create_user_memory`
+- **Write — agent_notes only** (`db.update_public_user_memory_agent_notes`): read-modify-write that replaces only the `agent_notes` key — `src/backend/db/public_links.py:update_user_memory_agent_notes`
+- **Write — conversation_summary only** (`db.update_public_user_memory_conversation_summary`): used by the background summarizer; never invoked from this tool — `src/backend/db/public_links.py:update_user_memory_conversation_summary`
 - **Index**: `idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)` — `src/backend/db/schema.py:1166`
 
 ### Table Schema
@@ -67,7 +75,7 @@ CREATE TABLE IF NOT EXISTS public_user_memory (
     id TEXT PRIMARY KEY,
     agent_name TEXT NOT NULL,
     user_email TEXT NOT NULL,
-    memory_text TEXT NOT NULL DEFAULT '',
+    memory_text TEXT NOT NULL DEFAULT '',  -- JSON blob since #895
     message_count INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -116,5 +124,6 @@ The agent never provides the user's email — it supplies only `execution_id`. T
 | `src/backend/main.py:95,830` | Router import and mount |
 
 ## Related Flows
-- [public-agent-links.md](feature-flows/public-agent-links.md) — public chat sessions that produce the `source_user_email` on executions
-- [execution-context-injection.md](feature-flows/execution-context-injection.md) — how `execution_id` is surfaced in the agent system prompt
+- [public-agent-links.md](public-agent-links.md) — web public chat sessions (read path that injects this memory into the system prompt; same split-storage rules)
+- [unified-channel-access-control.md](unified-channel-access-control.md) — Slack/Telegram/WhatsApp channel sessions that also inject memory (#895), gated on `verified_email and not is_group`
+- [execution-context-injection.md](execution-context-injection.md) — how `execution_id` is surfaced in the agent system prompt

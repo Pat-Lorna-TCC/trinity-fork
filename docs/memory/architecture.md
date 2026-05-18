@@ -207,7 +207,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 
 *Core:*
 - `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models
-- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline
+- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895)
 
 *Slack:*
 - `slack_adapter.py` - Slack adapter: DMs, @mentions, thread replies, agent identity via `chat:write.customize`

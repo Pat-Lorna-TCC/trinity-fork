@@ -10,6 +10,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import List, Optional
 
+import httpx
+
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -139,14 +141,137 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 - Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
 
 
-def format_user_memory_block(memory_text: str) -> str:
-    """
-    Format a user memory blob into a system prompt block for injection.
+def format_user_memory_block(memory_record: dict) -> Optional[str]:
+    """Format a user-memory record into a system-prompt block for injection.
 
-    This block is passed as system_prompt to execute_task() and gets layered
-    on top of the platform instructions via --append-system-prompt.
+    ``memory_record`` is the dict returned by
+    :py:meth:`Database.get_or_create_public_user_memory` — it carries two
+    independently-written sections (``agent_notes`` from the
+    write_user_memory MCP tool, and ``conversation_summary`` from the
+    background summarizer; see #895).
+
+    Both sections are rendered when present; empty sections are omitted.
+    Returns ``None`` when both sections are empty so callers can skip the
+    ``--append-system-prompt`` injection entirely.
     """
-    return f"## What you know about this user\n\n{memory_text.strip()}\n\n---"
+    if not isinstance(memory_record, dict):
+        return None
+    agent_notes = (memory_record.get("agent_notes") or "").strip()
+    summary = (memory_record.get("conversation_summary") or "").strip()
+    if not agent_notes and not summary:
+        return None
+
+    lines = ["## What you know about this user", ""]
+    if agent_notes:
+        lines.extend(["### Agent notes", "", agent_notes, ""])
+    if summary:
+        lines.extend(["### Conversation summary", "", summary, ""])
+    lines.append("---")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Background user-memory summarization (#895)
+# ---------------------------------------------------------------------------
+
+_SUMMARIZATION_MODEL = "claude-haiku-4-5-20251001"
+
+_SUMMARIZATION_PROMPT = """\
+You are a memory system. Given this conversation, extract a concise bullet list of facts \
+about the user that would be useful to remember for future conversations.
+Be specific: name, preferences, goals, context. Max 300 words.
+
+Existing memory:
+{existing_memory}
+
+New conversation:
+{conversation}
+
+Output the updated memory text only (bullet points, no headers)."""
+
+
+async def summarize_user_memory_background(
+    agent_name: str, user_email: str, session_id: str
+) -> None:
+    """Summarize recent conversation and update the ``conversation_summary`` section.
+
+    Fire-and-forget — failures are logged but never surfaced to the user.
+    Touches only ``conversation_summary`` so the deliberate agent_notes
+    section (written by ``write_user_memory``) is never re-summarized away
+    (#895).
+
+    Shared by the web public-chat path and the channel-adapter path so both
+    surfaces have the same persistent-memory behavior.
+    """
+    # Local imports to avoid an import cycle at module load:
+    # platform_prompt_service is imported by routers that the settings
+    # service may transitively pull in.
+    from services.settings_service import get_anthropic_api_key
+
+    try:
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            logger.warning(
+                "[MemSummarize] No ANTHROPIC_API_KEY configured, skipping summarization"
+            )
+            return
+
+        memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
+        existing_summary = memory_record.get("conversation_summary", "") or ""
+
+        messages = db.get_recent_public_chat_messages(session_id, limit=20)
+        if not messages:
+            return
+
+        conversation_lines = []
+        for msg in messages:
+            role_label = "User" if msg.role == "user" else "Assistant"
+            conversation_lines.append(f"{role_label}: {msg.content}")
+        conversation_text = "\n".join(conversation_lines)
+
+        prompt = _SUMMARIZATION_PROMPT.format(
+            existing_memory=existing_summary or "(none yet)",
+            conversation=conversation_text,
+        )
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": _SUMMARIZATION_MODEL,
+                    "max_tokens": 512,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+
+        if response.status_code != 200:
+            logger.error(
+                f"[MemSummarize] Anthropic API error {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+            return
+
+        data = response.json()
+        new_summary = (data.get("content", [{}])[0].get("text", "") or "").strip()
+        if new_summary:
+            db.update_public_user_memory_conversation_summary(
+                agent_name, user_email, new_summary
+            )
+            logger.info(
+                f"[MemSummarize] Updated conversation_summary for {user_email} "
+                f"on {agent_name} ({len(new_summary)} chars)"
+            )
+
+    except Exception as e:  # noqa: BLE001 — fire-and-forget background task
+        logger.error(
+            f"[MemSummarize] Failed to summarize memory for {user_email} "
+            f"on {agent_name}: {e}"
+        )
 
 
 def get_platform_system_prompt() -> str:

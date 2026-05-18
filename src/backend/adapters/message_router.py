@@ -12,6 +12,7 @@ Uses the same execution path as web public chat (EXEC-024) for:
 - Credential sanitization
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -22,6 +23,10 @@ from collections import defaultdict
 
 from database import db
 from services.docker_service import get_agent_container
+from services.platform_prompt_service import (
+    format_user_memory_block,
+    summarize_user_memory_background,
+)
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
 from services.docker_utils import container_exec_run
@@ -488,6 +493,23 @@ class ChannelMessageRouter:
         # off the same identity. Fall back to the channel-native source id.
         source_email = verified_email or adapter.get_source_identifier(message)
 
+        # MEM-001 (#895): inject per-user memory for verified channel users.
+        # Excluded in group mode because `verified_email` there is the
+        # *unlocker's* email (set once per group, not per-speaker), so
+        # injecting their memory into replies addressed to other group
+        # members would leak PII across users.
+        memory_system_prompt: Optional[str] = None
+        if verified_email and not is_group:
+            try:
+                user_memory = db.get_or_create_public_user_memory(
+                    agent_name, verified_email
+                )
+                memory_system_prompt = format_user_memory_block(user_memory)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[ROUTER:{channel}] memory fetch failed for {verified_email}: {e}"
+                )
+
         # Security: restrict tools for public channel users
         # No file access (Read exposes .env/credentials), no Bash, no Write/Edit
         # Configurable via settings_service (default: WebSearch, WebFetch)
@@ -513,6 +535,7 @@ class ChannelMessageRouter:
                 source_user_email=source_email,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
+                system_prompt=memory_system_prompt,
                 images=image_data or None,
             )
 
@@ -559,6 +582,26 @@ class ChannelMessageRouter:
         logger.debug(f"[ROUTER:{channel}] Step 11 - persisting messages")
         db.add_public_chat_message(session_id, "user", message.text)
         db.add_public_chat_message(session_id, "assistant", response_text, cost=result.cost)
+
+        # 11a. MEM-001 (#895): mirror the web path — increment per-user count
+        # and fire-and-forget the conversation summarizer every 5 messages.
+        # Same gating as the injection above (verified + not group).
+        if verified_email and not is_group:
+            try:
+                new_count = db.increment_public_user_memory_count(
+                    agent_name, verified_email
+                )
+                if new_count and new_count % 5 == 0:
+                    asyncio.create_task(summarize_user_memory_background(
+                        agent_name=agent_name,
+                        user_email=verified_email,
+                        session_id=session_id,
+                    ))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[ROUTER:{channel}] memory count/summarize trigger failed "
+                    f"for {verified_email}: {e}"
+                )
 
         # 11b. Extract code blocks as outbound files (after persisting, before sending)
         outbound_files = []

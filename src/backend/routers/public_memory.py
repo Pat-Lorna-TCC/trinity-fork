@@ -82,12 +82,15 @@ async def write_user_memory(
             detail="No verified user email associated with this execution.",
         )
 
-    # Upsert: create the row if it doesn't exist, then update the blob.
-    db.get_or_create_public_user_memory(agent_name, user_email)
-    db.update_public_user_memory(agent_name, user_email, body.memory_text)
+    # #895: write only the agent_notes section so the background
+    # conversation summarizer can't clobber deliberate agent writes (and
+    # vice versa). The row is created on demand inside the helper.
+    db.update_public_user_memory_agent_notes(
+        agent_name, user_email, body.memory_text
+    )
 
     logger.info(
-        f"[UserMemory] Updated memory for {user_email} on {agent_name} "
+        f"[UserMemory] Updated agent_notes for {user_email} on {agent_name} "
         f"({len(body.memory_text)} chars, execution={body.execution_id})"
     )
     return {"success": True, "agent_name": agent_name, "user_email": user_email}
