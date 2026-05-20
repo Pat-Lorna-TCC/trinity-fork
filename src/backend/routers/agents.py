@@ -419,30 +419,26 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # Issue #834 Phase 1a: agent delete is now a SOFT-delete. We stop +
+    # remove the container (Docker containers are ephemeral by design
+    # per the issue), and mark `agent_ownership.deleted_at`. Everything
+    # else — workspace/shared/public volumes, schedules, chat history,
+    # sharing, permissions, MCP key, credentials, avatars — is
+    # preserved until the retention sweep in cleanup_service.py runs
+    # `purge_agent_ownership()` after `agent_soft_delete_retention_days`
+    # (default 180). At that point the #816 cascade_delete primitive
+    # tears down all the child rows and on-disk artifacts in one shot.
+
     try:
         await container_stop(container)
         await container_remove(container)
     except Exception as e:
         logger.warning(f"Error stopping/removing container: {e}")
 
-    # Delete per-agent persistent volume
-    try:
-        agent_volume_name = f"agent-{agent_name}-workspace"
-        volume = await volume_get(agent_volume_name)
-        await volume_remove(volume)
-    except docker.errors.NotFound:
-        pass
-    except Exception as e:
-        logger.warning(f"Failed to delete workspace volume for agent {agent_name}: {e}")
-
-    # Delete all schedules for this agent
-    # Dedicated scheduler syncs from database automatically
-    db.delete_agent_schedules(agent_name)
-
-    # BACKLOG-001: Cancel any queued backlog items before deleting the agent
-    # so they don't sit around in schedule_executions pointing at a dead agent.
-    # CAPACITY-CONSOLIDATE (#428): single CapacityManager.cancel_all_overflow
-    # covers both in-memory queue and persistent backlog.
+    # BACKLOG-001: in-flight queued tasks can't be recovered (the
+    # container is gone), so cancel them now rather than waiting for
+    # the purge sweep — keeps the operator queue + Redis primitives
+    # consistent immediately.
     try:
         from services.capacity_manager import get_capacity_manager
         await get_capacity_manager().cancel_all_overflow(
@@ -451,92 +447,9 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         logger.warning(f"Failed to cancel backlog for agent {agent_name}: {e}")
 
-    # Delete git config if exists
-    git_service.delete_agent_git_config(agent_name)
-
-    # Delete agent's MCP API key
-    try:
-        db.delete_agent_mcp_api_key(agent_name)
-    except Exception as e:
-        logger.warning(f"Failed to delete MCP API key for agent {agent_name}: {e}")
-
-    # Delete agent permissions
-    try:
-        db.delete_agent_permissions(agent_name)
-    except Exception as e:
-        logger.warning(f"Failed to delete permissions for agent {agent_name}: {e}")
-
-    # Delete agent event subscriptions (EVT-001)
-    try:
-        db.delete_agent_event_subscriptions(agent_name)
-    except Exception as e:
-        logger.warning(f"Failed to delete event subscriptions for agent {agent_name}: {e}")
-
-    # Delete agent skills
-    try:
-        db.delete_agent_skills(agent_name)
-    except Exception as e:
-        logger.warning(f"Failed to delete skills for agent {agent_name}: {e}")
-
-    # Delete shared folder config and shared volume
-    try:
-        db.delete_shared_folder_config(agent_name)
-        shared_volume_name = db.get_shared_volume_name(agent_name)
-        try:
-            shared_volume = await volume_get(shared_volume_name)
-            await volume_remove(shared_volume)
-        except docker.errors.NotFound:
-            pass
-    except Exception as e:
-        logger.warning(f"Failed to delete shared folder config for agent {agent_name}: {e}")
-
-    # Delete per-agent public volume + shared-file rows + on-disk bytes
-    # (FILES-001). Backend connections don't PRAGMA foreign_keys=ON, so
-    # we can't rely on the FK ON DELETE CASCADE — follow the same explicit
-    # pattern used elsewhere in the codebase (see db.agent_settings.metadata
-    # :rename_agent which also manually updates all 16 child tables).
-    try:
-        stored_filenames = db.delete_shared_files_for_agent(agent_name)
-        for stored in stored_filenames:
-            try:
-                path = Path("/data/agent-files") / stored
-                if path.exists():
-                    path.unlink()
-            except Exception as e:
-                logger.warning(f"Failed to unlink shared file {stored}: {e}")
-
-        public_volume_name = db.get_public_volume_name(agent_name)
-        try:
-            public_volume = await volume_get(public_volume_name)
-            await volume_remove(public_volume)
-        except docker.errors.NotFound:
-            pass
-    except Exception as e:
-        logger.warning(f"Failed to delete public volume for agent {agent_name}: {e}")
-
-    # Delete agent tags (ORG-001)
-    try:
-        db.delete_agent_tags(agent_name)
-    except Exception as e:
-        logger.warning(f"Failed to delete tags for agent {agent_name}: {e}")
-
-    # Delete cached avatar, reference, and emotion images (AVATAR-001, AVATAR-002)
-    try:
-        for ext in (".webp", ".png"):
-            p = Path("/data/avatars") / f"{agent_name}{ext}"
-            if p.exists():
-                p.unlink()
-        ref = Path("/data/avatars") / f"{agent_name}_ref.png"
-        if ref.exists():
-            ref.unlink()
-        for emotion in AVATAR_EMOTIONS:
-            for ext in (".webp", ".png"):
-                p = Path("/data/avatars") / f"{agent_name}_emotion_{emotion}{ext}"
-                if p.exists():
-                    p.unlink()
-    except Exception as e:
-        logger.warning(f"Failed to delete avatar for agent {agent_name}: {e}")
-
+    # Mark the row as soft-deleted. Children stay until the retention
+    # sweep; the unique constraint on agent_name naturally blocks reuse
+    # during the retention window.
     db.delete_agent_ownership(agent_name)
 
     # SEC-001: audit delete after all cleanup and ownership removal committed.

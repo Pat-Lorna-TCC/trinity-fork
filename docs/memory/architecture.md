@@ -398,7 +398,7 @@ Services that run continuously in the backend process:
 
 | Service | Module | Description |
 |---------|--------|-------------|
-| **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. Also runs the #772 retention sweeps: nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` rows past `execution_row_retention_days` (default 90), and DELETEs `agent_health_checks` rows past `health_check_retention_days` (default 7). Each sweep is capped at 5000 rows/cycle so the first post-deploy backfill spans hours, not minutes; `0` disables a sweep. Triggers `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. (CLEANUP-001, #129, #772) |
+| **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. Also runs the #772 retention sweeps: nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` rows past `execution_row_retention_days` (default 90), and DELETEs `agent_health_checks` rows past `health_check_retention_days` (default 7). Also runs the #834 Phase 1a soft-deleted-agent purge: hard-deletes `agent_ownership` rows whose `deleted_at` is older than `agent_soft_delete_retention_days` (default 180, `0` = disabled), cascading child tables via the #816 `purge_agent_ownership`/`cascade_delete` primitive. Each sweep is capped at 5000 rows/cycle so the first post-deploy backfill spans hours, not minutes; `0` disables a sweep. Triggers `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. (CLEANUP-001, #129, #772, #834) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
@@ -921,10 +921,29 @@ CREATE TABLE agent_ownership (
     voice_system_prompt TEXT,
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
+    deleted_at TEXT,                               -- #834 Phase 1a: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id),
     FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
 );
+
+-- #834 Phase 1a: partial index narrows the retention-sweep scan to
+-- actually-deleted rows so it stays cheap as the live agent count grows.
+CREATE INDEX idx_agent_ownership_deleted_at
+    ON agent_ownership(deleted_at) WHERE deleted_at IS NOT NULL;
 ```
+
+**Soft-delete (#834 Phase 1a)**: `DELETE /api/agents/{name}` marks
+`agent_ownership.deleted_at = NOW` instead of hard-deleting; child rows
+are preserved (recoverable until purge). The Cleanup Service hard-purges
+rows past `agent_soft_delete_retention_days` (default 180, `0` =
+disabled), running the #816 `cascade_delete` primitive at that point to
+wipe every per-agent child table. Name reservation
+(`is_agent_name_reserved()`) sees soft-deleted rows so a soft-deleted
+name cannot be reused before purge. The scheduler's
+`list_all_enabled_schedules()` joins `agent_ownership` and filters
+`deleted_at IS NULL` so a soft-deleted agent's schedules stop firing
+immediately. **Phase 1b** (schedule soft-delete) and **Phase 1c** (admin
+recovery endpoints) build on this.
 
 **agent_sharing:** (cross-channel allow-list — same email admits the user on web, Telegram, and Slack)
 ```sql

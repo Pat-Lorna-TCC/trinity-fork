@@ -28,7 +28,7 @@ class ResourcesMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT memory_limit, cpu_limit
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -82,7 +82,7 @@ class ResourcesMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(max_parallel_tasks, 3) as max_parallel_tasks
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -125,6 +125,7 @@ class ResourcesMixin:
             cursor.execute("""
                 SELECT agent_name, COALESCE(max_parallel_tasks, 3) as max_parallel_tasks
                 FROM agent_ownership
+                WHERE deleted_at IS NULL
             """)
             return {row["agent_name"]: row["max_parallel_tasks"] for row in cursor.fetchall()}
 
@@ -146,7 +147,7 @@ class ResourcesMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(execution_timeout_seconds, 3600) as execution_timeout_seconds
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -165,6 +166,7 @@ class ResourcesMixin:
             cursor.execute("""
                 SELECT agent_name, COALESCE(execution_timeout_seconds, 3600) as timeout
                 FROM agent_ownership
+                WHERE deleted_at IS NULL
             """)
             return {row["agent_name"]: row["timeout"] for row in cursor.fetchall()}
 
@@ -208,7 +210,7 @@ class ResourcesMixin:
             cursor.execute(
                 """
                 SELECT COALESCE(max_backlog_depth, 50) as max_backlog_depth
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
                 """,
                 (agent_name,),
             )

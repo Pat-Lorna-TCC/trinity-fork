@@ -274,7 +274,8 @@ def canary_db(monkeypatch):
             owner_id TEXT NOT NULL,
             is_system INTEGER DEFAULT 0,
             max_parallel_tasks INTEGER DEFAULT 3,
-            execution_timeout_seconds INTEGER DEFAULT 900
+            execution_timeout_seconds INTEGER DEFAULT 900,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         );
         CREATE TABLE schedule_executions (
             id TEXT PRIMARY KEY,

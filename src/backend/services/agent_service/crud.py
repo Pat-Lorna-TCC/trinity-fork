@@ -92,7 +92,17 @@ async def create_agent_internal(
     if not config.name:
         raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
 
-    if get_agent_by_name(config.name) or db.get_agent_owner(config.name):
+    # #834: the name-reservation check must also catch soft-deleted agents.
+    # `get_agent_owner` filters them out (user-facing 404 transparency), so
+    # we use the unfiltered `is_agent_name_reserved` here. Without this the
+    # create flow walks past the existence guard, the container ends up
+    # created, and the agent_ownership INSERT hits a UNIQUE constraint
+    # IntegrityError leaving the system half-built.
+    if (
+        get_agent_by_name(config.name)
+        or db.get_agent_owner(config.name)
+        or db.is_agent_name_reserved(config.name)
+    ):
         raise HTTPException(status_code=409, detail="Agent already exists")
 
     # Agent quota enforcement: per-role limits (QUOTA-001)

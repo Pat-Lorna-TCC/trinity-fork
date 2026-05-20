@@ -182,7 +182,8 @@ class TestGetRunningExecutionsWithAgentInfo:
             CREATE TABLE agent_ownership (
                 agent_name TEXT PRIMARY KEY,
                 owner_id INTEGER NOT NULL,
-                execution_timeout_seconds INTEGER DEFAULT 900
+                execution_timeout_seconds INTEGER DEFAULT 900,
+                deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
             )
         """)
         conn.commit()

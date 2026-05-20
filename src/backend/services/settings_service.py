@@ -44,6 +44,14 @@ OPS_SETTINGS_DEFAULTS = {
     "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days
     "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days
     "health_check_retention_days": "7",   # DELETE agent_health_checks rows after N days
+    # Issue #834 Phase 1a: soft-delete retention for agents. After
+    # DELETE /api/agents/{name}, the agent_ownership row is marked
+    # `deleted_at = NOW` and child rows are preserved. The cleanup
+    # sweep hard-deletes rows older than this many days (cascading
+    # child tables via #816's purge primitive). "0" disables the
+    # sweep entirely — soft-deleted rows then persist until manually
+    # purged.
+    "agent_soft_delete_retention_days": "180",
 }
 
 # Descriptions for each ops setting
@@ -60,6 +68,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "execution_log_retention_days": "Days to retain the JSONL transcript on schedule_executions (default: 30, 0 = disabled, #772)",
     "execution_row_retention_days": "Days to retain finished schedule_execution rows; rows older than this are deleted (default: 90, 0 = disabled, #772)",
     "health_check_retention_days": "Days to retain agent_health_checks rows (default: 7, 0 = disabled, #772)",
+    "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
 }
 
 

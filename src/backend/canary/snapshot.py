@@ -213,6 +213,12 @@ def _collect_known_agents() -> List[Dict[str, Any]]:
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Intentionally NOT filtering `deleted_at IS NULL` (#834). The
+        # canary's `known_agents` set drives L-03 (orphan-row detection)
+        # — soft-deleted-pending-purge agents legitimately have child
+        # rows in the live tables until the retention sweep runs.
+        # Treating them as "unknown" would surface those preserved rows
+        # as false-positive orphans.
         cursor.execute(
             """
             SELECT agent_name,

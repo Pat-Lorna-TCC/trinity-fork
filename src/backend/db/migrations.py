@@ -2078,6 +2078,33 @@ def _migrate_default_execution_timeout_to_3600(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_soft_delete(cursor, conn):
+    """Issue #834 Phase 1a: soft-delete column + partial index on agent_ownership.
+
+    Adds `deleted_at TEXT` (NULL = live). The hard-delete path on
+    `agent_ownership` becomes a soft-delete (UPDATE deleted_at = now);
+    the retention sweep in cleanup_service hard-deletes rows whose
+    deleted_at is older than the configured retention window (default
+    180 days) and runs the #816 cascade_delete at that point to clean
+    child tables.
+
+    The partial index narrows the retention-sweep scan to
+    actually-deleted rows so it stays cheap as the live agent count
+    grows.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "deleted_at",
+        "ALTER TABLE agent_ownership ADD COLUMN deleted_at TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_ownership_deleted_at "
+        "ON agent_ownership(deleted_at) WHERE deleted_at IS NOT NULL"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2139,4 +2166,5 @@ MIGRATIONS = [
     ("execution_retention_index", _migrate_execution_retention_index),
     ("default_execution_timeout_to_3600", _migrate_default_execution_timeout_to_3600),
     ("fix_retention_index_status_values", _migrate_fix_retention_index_status_values),
+    ("agent_ownership_soft_delete", _migrate_agent_ownership_soft_delete),
 ]

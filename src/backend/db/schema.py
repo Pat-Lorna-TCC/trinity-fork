@@ -91,6 +91,7 @@ TABLES = {
             voice_system_prompt TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
+            deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
         )
@@ -1049,6 +1050,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_owner ON agent_ownership(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_name ON agent_ownership(agent_name)",
+    # Issue #834: partial index for the retention sweep — narrow scan to
+    # rows that are actually soft-deleted, not the whole agent table.
+    "CREATE INDEX IF NOT EXISTS idx_agent_ownership_deleted_at "
+    "ON agent_ownership(deleted_at) WHERE deleted_at IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_sharing_agent ON agent_sharing(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_sharing_email ON agent_sharing(shared_with_email)",
 

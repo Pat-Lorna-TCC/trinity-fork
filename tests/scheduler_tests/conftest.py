@@ -149,7 +149,8 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             agent_name TEXT PRIMARY KEY,
             owner_id INTEGER NOT NULL,
             autonomy_enabled INTEGER DEFAULT 0,
-            created_at TEXT
+            created_at TEXT,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         )
     """)
 

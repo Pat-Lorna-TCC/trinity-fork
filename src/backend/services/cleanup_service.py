@@ -140,6 +140,8 @@ class CleanupReport:
     execution_logs_pruned: int = 0
     execution_rows_pruned: int = 0
     health_checks_pruned: int = 0
+    # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
+    soft_deleted_agents_purged: int = 0
 
     @property
     def total(self) -> int:
@@ -148,7 +150,7 @@ class CleanupReport:
                 self.orphaned_skipped + self.stale_activities + self.stale_slots +
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
-                self.health_checks_pruned)
+                self.health_checks_pruned + self.soft_deleted_agents_purged)
 
     def to_dict(self) -> Dict:
         return {
@@ -164,6 +166,7 @@ class CleanupReport:
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
             "health_checks_pruned": self.health_checks_pruned,
+            "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "total": self.total,
         }
 
@@ -387,13 +390,59 @@ class CleanupService:
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning health checks: {e}")
 
+        # 4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past
+        # their retention window. `purge_agent_ownership` runs the #816
+        # cascade_delete primitive so every per-agent child row goes with
+        # the parent in a single transaction. Bounded by the same
+        # 5000-row/cycle cap as the other sweeps so a backlog after a
+        # long-disabled retention setting drains gradually.
+        try:
+            from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+            raw_sd_days = db.get_setting_value(
+                "agent_soft_delete_retention_days",
+                OPS_SETTINGS_DEFAULTS.get("agent_soft_delete_retention_days", "180"),
+            )
+            try:
+                sd_days = max(int(raw_sd_days), 0)
+            except (TypeError, ValueError):
+                sd_days = 0
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reading agent retention setting: {e}")
+            sd_days = 0
+
+        if sd_days > 0:
+            try:
+                names = db.find_soft_deleted_agents_past_retention(
+                    retention_days=sd_days,
+                    limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                purged = 0
+                for name in names:
+                    try:
+                        if db.purge_agent_ownership(name):
+                            purged += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"[Cleanup] Failed to purge soft-deleted agent {name}: {e}"
+                        )
+                report.soft_deleted_agents_purged = purged
+                if purged > 0:
+                    logger.info(
+                        f"[Cleanup] Hard-purged {purged} soft-deleted agent(s) "
+                        f"past {sd_days}-day retention (#834)"
+                    )
+            except Exception as e:
+                logger.error(f"[Cleanup] Error pruning soft-deleted agents: {e}")
+
         # 4d. Issue #772: after a retention sweep reclaims meaningful space,
         # truncate the WAL so the OS sees the free pages. Checkpoint is cheap
         # and safe to run per-cycle when there's work to do; full VACUUM is
         # gated to a daily off-peak job (see start()).
         retention_total = (report.execution_logs_pruned
                            + report.execution_rows_pruned
-                           + report.health_checks_pruned)
+                           + report.health_checks_pruned
+                           + report.soft_deleted_agents_purged)
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()

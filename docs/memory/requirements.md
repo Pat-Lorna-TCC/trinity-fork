@@ -2104,6 +2104,56 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 
 ---
 
+## 33. Agent Soft-Delete & Retention Lifecycle (#834)
+
+### 33.1 Agent Soft-Delete + Retention Purge (#834 — Phase 1a)
+- **Implements**: Issue #834 Phase 1a
+- **Description**: `DELETE /api/agents/{name}` no longer hard-deletes the
+  `agent_ownership` row. It marks `agent_ownership.deleted_at = NOW`
+  (NULL = live) and preserves every per-agent child row, so an
+  accidentally-deleted agent's history, schedules, and config remain
+  recoverable until the retention window expires. The container and
+  runtime resources are still torn down on delete — only the database
+  rows are retained.
+- **Retention purge**: the Cleanup Service (`cleanup_service.py`, 5-min
+  loop) hard-purges `agent_ownership` rows whose `deleted_at` is older
+  than `agent_soft_delete_retention_days` (default **180**, `0` =
+  disabled — soft-deleted rows then persist until manually purged).
+  Purge runs the #816 `purge_agent_ownership` → `cascade_delete`
+  primitive so all per-agent child rows are removed in one transaction;
+  `KEEP`-policy tables (`schedule_executions`, `nevermined_payment_log`)
+  survive per their own retention discipline. Bounded by the shared
+  5000-row/cycle cap so a backlog drains gradually.
+- **Name reservation**: `is_agent_name_reserved()` is intentionally
+  unfiltered — it sees soft-deleted rows so a soft-deleted name cannot
+  be reused (and silently clobbered) before purge.
+- **Scheduler gap closed**: `list_all_enabled_schedules()` (backend +
+  the standalone scheduler process) joins `agent_ownership` and filters
+  `deleted_at IS NULL`, so a soft-deleted agent's enabled schedules stop
+  firing immediately rather than generating a `schedule_executions`
+  failure row per cron tick for up to 180 days.
+- **Canary**: soft-deleted agents are intentionally *kept* in the
+  canary snapshot's `known_agents` set (NOT filtered by `deleted_at`) so
+  L-03 (delete-cascade) does not false-positive on the child rows that
+  are legitimately preserved until the retention purge runs.
+- **Setting**: `agent_soft_delete_retention_days` in the ops settings
+  block (default `"180"`, `"0"` disables).
+- **Storage**: `agent_ownership.deleted_at TEXT` + partial index
+  `idx_agent_ownership_deleted_at ON agent_ownership(deleted_at) WHERE
+  deleted_at IS NOT NULL`. Migration
+  `agent_ownership_soft_delete`.
+
+### 33.2 Schedule Soft-Delete (#834 — Phase 1b)
+- **Status**: 🚧 In progress (PR #839). `agent_schedules.deleted_at`;
+  all schedule read paths filter `deleted_at IS NULL`; configurable
+  `schedule_soft_delete_retention_days`.
+
+### 33.3 Admin Recovery Endpoints (#834 — Phase 1c)
+- **Status**: 🚧 In progress (PR #840). Admin surface to list and
+  recover soft-deleted agents/schedules before the retention purge.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

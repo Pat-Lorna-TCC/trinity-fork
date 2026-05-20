@@ -305,12 +305,21 @@ class ScheduleOperations:
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
 
     def list_all_enabled_schedules(self) -> List[Schedule]:
-        """List all enabled schedules (for scheduler initialization)."""
+        """List all enabled schedules (for scheduler initialization).
+
+        Excludes schedules whose agent has been soft-deleted (#834
+        Phase 1a): without the `agent_ownership` join the scheduler
+        would fire every enabled schedule for a soft-deleted agent and
+        write a `schedule_executions` failure row on each attempt until
+        the retention purge runs (up to 180 days later).
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM agent_schedules WHERE enabled = 1
-                ORDER BY agent_name, name
+                SELECT s.* FROM agent_schedules s
+                JOIN agent_ownership ao ON ao.agent_name = s.agent_name
+                WHERE s.enabled = 1 AND ao.deleted_at IS NULL
+                ORDER BY s.agent_name, s.name
             """)
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
 

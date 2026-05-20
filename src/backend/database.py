@@ -346,6 +346,15 @@ class DatabaseManager:
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
 
+    def purge_agent_ownership(self, agent_name: str):
+        return self._agent_ops.purge_agent_ownership(agent_name)
+
+    def find_soft_deleted_agents_past_retention(self, retention_days: int, limit: int = 5000):
+        return self._agent_ops.find_soft_deleted_agents_past_retention(retention_days, limit)
+
+    def is_agent_name_reserved(self, agent_name: str):
+        return self._agent_ops.is_agent_name_reserved(agent_name)
+
     def rename_agent(self, old_name: str, new_name: str):
         return self._agent_ops.rename_agent(old_name, new_name)
 
