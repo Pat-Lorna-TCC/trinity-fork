@@ -403,7 +403,7 @@ Services that run continuously in the backend process:
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. On each cron-triggered fire, optionally invokes the agent's executable `~/.trinity/pre-check` (interpreter chosen by shebang) via the backend's `POST /api/internal/agents/{name}/pre-check` (which `docker exec`s into the agent container). Empty stdout + exit 0 records a skipped execution and does not invoke Claude (SCHED-COND-001, #454). |
-| **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. (BACKLOG-001 / CAPACITY-CONSOLIDATE #428) |
+| **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. On each successful sweep, writes a unix-timestamp heartbeat to Redis key `canary:drain_tick_at` (read by canary B-02 to distinguish stuck drains from "drain just hasn't run yet"). (BACKLOG-001 / CAPACITY-CONSOLIDATE #428; B-02 heartbeat #882) |
 | **Audit Retention** | `audit_retention_service.py` | Daily APScheduler job at 04:15 UTC that DELETEs `audit_log` rows past the retention window. Configured via `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design. (#552) |
 | **DB Vacuum** | `db_vacuum_service.py` | Daily APScheduler job at 04:30 UTC that runs `VACUUM` on `/data/trinity.db` to reclaim pages freed by the cleanup-service retention sweeps. Configurable via `DB_VACUUM_ENABLED` / `DB_VACUUM_HOUR` / `DB_VACUUM_MINUTE`. Opens an autocommit (`isolation_level=None`) connection because VACUUM cannot run inside a transaction; accepts the rare BUSY outcome rather than retrying. (#772) |
 | **Session Cleanup** | `session_cleanup_service.py` | Periodic JSONL reaper for the Session tab. Default 6h cycle (`poll_interval_seconds`); each cycle diffs every running agent's `~/.claude/projects/-home-developer/<uuid>.jsonl` set against `agent_sessions.cached_claude_session_id` and deletes JSONLs not in the keep set whose mtime is older than `min_age_seconds` (default 1h race guard). Synchronous best-effort `reap_jsonl()` is also called by the session router on user-initiated reset/delete so the disk reclaim is immediate. Uses `execute_command_in_container` (no agent-server endpoint required). (SESSION_TAB Phase 4.2) |
@@ -701,7 +701,7 @@ export, enable/disable toggle. Issue #20 can be closed.
 **Storage**: `canary_violations` table in main SQLite DB. JSON-encoded
 `observed_state` column carries invariant-specific payload.
 
-**Phase 1 invariants** (S-01, E-02, L-03):
+**Phase 1 invariants** (#653 — S-01, E-02, L-03):
 - **S-01 — Slot–row bijection**: per agent, set of execution_ids in
   `agent:slots:{name}` (Redis ZSET, drain sentinels filtered) equals set
   of execution_ids in `schedule_executions WHERE status='running'`.
@@ -719,6 +719,51 @@ export, enable/disable toggle. Issue #20 can be closed.
   in `agent_ownership`; no Redis `agent:slots:{name}` for missing agent.
   Severity: critical for orphaned `schedule_executions` or Redis slots,
   major otherwise. Catches Issue #129 bug class.
+
+**Phase 2 invariants** (#882 — S-02, E-01, E-05, B-01):
+- **S-02 — No overbooking**: per agent, `ZCARD(agent:slots:{name})`
+  (drain sentinels filtered) ≤ `agent_ownership.max_parallel_tasks`.
+  Severity: critical. Catches `acquire_slot` concurrency-bypass
+  regressions — distinct from S-01 because the violation can be self-
+  consistent (Redis and SQL agree on N+1 running tasks against a cap of N).
+- **E-01 — Terminal-state closure**: no `status='running'` row whose
+  `started_at` is older than the agent's `execution_timeout_seconds + 300s`
+  (matches `SLOT_TTL_BUFFER` so the check fires *after* cleanup has had
+  its window to act). Severity: critical. Tier B.
+- **E-05 — Dispatched rows have session**: no `status='running'` row
+  older than 60s with `claude_session_id IS NULL`. Severity: major.
+  Tier B. Guards Issue #106.
+- **B-01 — Queue-status coherence**: per agent, `db.get_queued_count`
+  (the accessor `BacklogService` calls) agrees with the snapshot's
+  independently-collected `len(queued_exec_ids)`. Severity: critical.
+  Tier A. Trivially-green today after the #428 consolidation; exists as
+  a regression guard against a future cache layer or status-filter drift
+  on the production accessor.
+
+**Phase 3 invariants** (#882, same PR — S-03, B-02, R-01):
+- **S-03 — Slot TTL ≥ execution timeout**: for every member of
+  `agent:slots:{name}`, the companion `agent:slot:{name}:{eid}` HASH
+  has `TTL ≥ execution_timeout_seconds + 300s`. Three failure kinds
+  surfaced explicitly: `missing` (-2, metadata HASH expired ahead of
+  the ZSET — the #226 class), `no_expiry` (-1, `expire()` never set),
+  `below_floor` (positive TTL under the configured floor). Severity:
+  critical. Tier A.
+- **B-02 — No queued without slots-full**: if any agent has
+  `len(queued_exec_ids) > 0`, then either `slot_count == max_parallel`
+  OR a drain tick fired in the last 60s. Severity: critical. Tier B.
+  Heartbeat written by `CapacityManager.run_maintenance()` to
+  `canary:drain_tick_at` at the END of each successful sweep, so a
+  mid-sweep crash leaves the cursor stale and lets the check catch the
+  breakage.
+- **R-01 — No zombie Claude processes**: for every running
+  `trinity.platform=agent` container,
+  `ps -eo stat,comm | grep '^Z.*claude' | wc -l == 0`. Severity:
+  critical. Tier A. Guards PR #407. New source type for the canary
+  (docker exec); per-container failures recorded in
+  `sources_unavailable` so a single unhealthy container doesn't kill
+  the cycle. The regex is anchored at `^Z` rather than the catalog's
+  ` Z` (leading-space) — procps-ng on the agent base image emits STAT
+  left-aligned without padding.
 
 **Fleet**: `config/canary-fleet.yaml` — synthetic load generators
 (`canary-fleet-burst`, `canary-fleet-long`) deployed via the existing
