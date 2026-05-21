@@ -33,6 +33,7 @@ from ._runtime_config import (
     _load_guardrails,
 )
 from .error_classifier import (
+    _classify_signal_exit,
     _diagnose_exit_failure,
     _format_rate_limit_error,
     _is_rate_limit_message,
@@ -448,6 +449,18 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
 
             # Check for errors
             if return_code != 0:
+                # Issue #906: Signal terminations (SIGKILL/SIGTERM/SIGINT — OOM,
+                # timeout, operator cancel) must be classified before the
+                # auth-fallback heuristic in `_diagnose_exit_failure`, which
+                # would otherwise misread "zero tokens processed" as an
+                # expired subscription token. Mirrors the symmetric check
+                # in headless_executor (Issue #516).
+                signal_exit = _classify_signal_exit(return_code, metadata)
+                if signal_exit is not None:
+                    status_code, detail = signal_exit
+                    logger.warning(f"[Chat] {detail}")
+                    raise HTTPException(status_code=status_code, detail=detail)
+
                 error_detail = stderr_output[:500] if stderr_output else ""
                 if not error_detail:
                     error_detail = _diagnose_exit_failure(return_code, metadata)
