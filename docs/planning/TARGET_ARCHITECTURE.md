@@ -433,17 +433,39 @@ These decisions are already correct and should not be revisited without strong e
 
 ## Key Open Questions
 
-These are architectural decisions not yet resolved. They should be answered before the relevant components are built.
+These are architectural decisions not yet resolved. They should be answered before the relevant components are built. Each has a tracking issue.
 
-1. **Journal format**: What does `journal.ndjson` contain per entry? The envelope fields are defined; the payload schema for each `kind` is not. A one-page spec is required before Phase 2 of the actor model transition.
+1. **Journal format** (issue #945): What does `journal.ndjson` contain per entry? The envelope fields are defined; the payload schema for each `kind` is not. The one-page postcard (envelope + journal format) is required before the Phase 2 actor-model experiment (#946) can be scheduled.
 
-2. **PostgreSQL migration strategy**: What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. Needs a detailed plan before the migration ticket is opened.
+2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. #300 covers the SQLAlchemy Core abstraction step; a detailed cutover plan is still required before the migration ticket is opened.
 
-3. **GuardAgent evaluation**: How does the GuardAgent evaluate output quality? Rule-based (regexes, schema validation) is implementable today. LLM-based evaluation (semantic quality scoring) is more powerful but adds latency and cost. The boundary between them needs a design decision.
+3. **GuardAgent evaluation** (issue #947): How does the GuardAgent evaluate output quality? Rule-based (regexes, schema validation) is implementable today. LLM-based evaluation (semantic quality scoring) is more powerful but adds latency and cost. The boundary between them needs a design decision.
 
-4. **Celery vs. APScheduler+Redis**: Celery adds operational surface (worker processes, task routing, retry configuration). Is the distributed redundancy benefit worth it for operators running single-node deployments? The alternative is APScheduler backed by a PostgreSQL job store, which gives persistence without the full Celery stack. Decision should be made before the scheduler migration is planned.
+4. **Celery vs. APScheduler+PG** (issue #949): Celery adds operational surface (worker processes, task routing, retry configuration). Is the distributed redundancy benefit worth it for operators running single-node deployments? The alternative is APScheduler backed by a PostgreSQL job store, which gives persistence without the full Celery stack. Decision should be made before the scheduler migration is planned.
 
-5. **Replica-group coordination (issue #927)**: the single-writer election for git pushes, the journal-projection serialization path, and the `template.yaml` schema for declaring replica-safety all need design before `replica_count > 1` is exposed. Container autoscaling (vs. operator-set replica counts) is explicitly out of scope until real load patterns justify it.
+5. **Replica-group coordination** (issue #927): the single-writer election for git pushes, the journal-projection serialization path, and the `template.yaml` schema for declaring replica-safety all need design before `replica_count > 1` is exposed. Container autoscaling (vs. operator-set replica counts) is explicitly out of scope until real load patterns justify it.
+
+6. **Workflow-scoped capability tokens** (issue #948): the §Security and Trust addition — ephemeral tokens scoped to a `correlation_id` so a compromised agent's blast radius is bounded to its active workflows rather than its permanent permission set. Layered on top of `agent_permissions`, not a replacement. Sequencing depends on the #946 decision gate.
+
+## Tracking Issues
+
+Critical-path work toward this architecture is tracked in GitHub:
+
+| Surface | Issues |
+|---------|--------|
+| Cleanup pyramid collapse | #429 |
+| Idempotency keys at trigger boundaries | #525 |
+| Per-agent dispatch circuit breaker | #526 |
+| Agent heartbeat push (5s) | #307 |
+| Actor-model postcard (envelope + journal) | #945 |
+| Phase 2 actor-model experiment (MCP boundary) | #946 |
+| GuardAgent design + rule-based prototype | #947 |
+| Workflow-scoped capability tokens | #948 |
+| Celery vs APScheduler+PG decision | #949 |
+| Replica groups | #927 |
+| PostgreSQL migration | #300 |
+
+See `ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these.
 
 ---
 
