@@ -764,11 +764,21 @@ export, enable/disable toggle. Issue #20 can be closed.
 **Phase 3 invariants** (#882, same PR — S-03, B-02, R-01):
 - **S-03 — Slot TTL ≥ execution timeout**: for every member of
   `agent:slots:{name}`, the companion `agent:slot:{name}:{eid}` HASH
-  has `TTL ≥ execution_timeout_seconds + 300s`. Three failure kinds
+  must have been created with at least
+  `execution_timeout_seconds + 300s` of TTL. Three failure kinds
   surfaced explicitly: `missing` (-2, metadata HASH expired ahead of
   the ZSET — the #226 class), `no_expiry` (-1, `expire()` never set),
-  `below_floor` (positive TTL under the configured floor). Severity:
-  critical. Tier A.
+  `below_floor` (initial TTL under the configured floor). Severity:
+  critical. Tier A. **Decay-invariance (#913):** the raw `TTL` of a
+  long-lived slot decays linearly from `EXPIRE`, so once #913 makes the
+  initial TTL equal the floor exactly, a raw `ttl < floor` check would
+  fire by ~1s within the cycle. The Phase 3.1 implementation
+  reconstructs the *initial* TTL as `ttl + age` where
+  `age = snapshot_time - slot_score` (the ZSET member's score is the
+  unix epoch recorded by `SlotService` at ZADD time) and compares
+  against `floor - 1` (1s tolerance for Redis float→int wire rounding).
+  A real #226-class bug (initial TTL set below the floor) still
+  surfaces; natural decay does not.
 - **B-02 — No queued without slots-full**: if any agent has
   `len(queued_exec_ids) > 0`, then either `slot_count == max_parallel`
   OR a drain tick fired in the last 60s. Severity: critical. Tier B.
@@ -1046,6 +1056,7 @@ CREATE TABLE agent_schedules (
     last_run_at TEXT,
     next_run_at TEXT,
     model TEXT,                                  -- MODEL-001: Model override (NULL = agent default)
+    timeout_seconds INTEGER,                     -- #913: NULL = inherit agent_ownership.execution_timeout_seconds
     webhook_token TEXT,                          -- WEBHOOK-001: opaque 43-char urlsafe token, nullable
     webhook_enabled INTEGER DEFAULT 0,           -- WEBHOOK-001: 0 = disabled, 1 = active
     deleted_at TEXT,                             -- #834 Phase 1b: NULL = live; set = soft-deleted

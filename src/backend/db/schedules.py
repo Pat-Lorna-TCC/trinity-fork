@@ -92,7 +92,9 @@ class ScheduleOperations:
             updated_at=parse_iso_timestamp(row["updated_at"]),
             last_run_at=parse_iso_timestamp(row["last_run_at"]) if row["last_run_at"] else None,
             next_run_at=parse_iso_timestamp(row["next_run_at"]) if row["next_run_at"] else None,
-            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys and row["timeout_seconds"] else 3600,
+            # #913: NULL ⇒ inherit from agent_ownership.execution_timeout_seconds.
+            # Do NOT fall through to a constant here — that was the bug.
+            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys else None,
             allowed_tools=allowed_tools,
             model=row["model"] if "model" in row_keys else None,
             # Retry configuration (RETRY-001)

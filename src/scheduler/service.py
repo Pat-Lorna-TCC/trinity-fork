@@ -81,6 +81,15 @@ def _is_auth_failure(error_msg: str) -> bool:
     return any(ind in error_lower for ind in _AUTH_INDICATORS)
 
 
+# #913: Polling-deadline fallback when the schedule's timeout_seconds is
+# NULL (= "inherit per-agent value"). The scheduler does not have the
+# per-agent value in this process; the backend enforces the real timeout.
+# 7200s matches the upper clamp of PUT /api/agents/{name}/timeout — any
+# per-agent value is bounded by this, so the scheduler's poll deadline
+# never gives up before the backend itself does.
+_POLL_DEADLINE_WHEN_NULL = 7200
+
+
 class SchedulerService:
     """
     Manages scheduled task execution for agents.
@@ -1002,7 +1011,7 @@ class SchedulerService:
         message: str,
         triggered_by: str,
         model: Optional[str] = None,
-        timeout_seconds: int = 900,
+        timeout_seconds: Optional[int] = None,
         allowed_tools: Optional[list] = None,
         execution_id: Optional[str] = None,
     ) -> dict:
@@ -1089,7 +1098,7 @@ class SchedulerService:
     async def _poll_execution_completion(
         self,
         execution_id: str,
-        timeout_seconds: int,
+        timeout_seconds: Optional[int],
     ) -> dict:
         """
         Poll the DB for execution completion (SCHED-ASYNC-001).
@@ -1103,8 +1112,14 @@ class SchedulerService:
         Raises:
             Exception if polling deadline exceeded.
         """
+        # #913: schedule.timeout_seconds may be None (= inherit per-agent
+        # value). The backend enforces the real timeout; the scheduler just
+        # needs a poll budget that's at least as long as any per-agent
+        # timeout can be. _POLL_DEADLINE_WHEN_NULL is the agent-config upper
+        # clamp, so we never give up before the backend itself does.
+        effective_timeout = float(timeout_seconds if timeout_seconds is not None else _POLL_DEADLINE_WHEN_NULL)
         # Deadline = task timeout + grace buffer for slot acquisition and cleanup
-        deadline = time.monotonic() + float(timeout_seconds) + config.poll_deadline_buffer
+        deadline = time.monotonic() + effective_timeout + config.poll_deadline_buffer
         poll_count = 0
 
         while time.monotonic() < deadline:
@@ -1132,7 +1147,7 @@ class SchedulerService:
                 }
 
             if poll_count % 6 == 0:  # Log every ~60s at default 10s interval
-                elapsed = int(time.monotonic() - (deadline - float(timeout_seconds) - 60))
+                elapsed = int(time.monotonic() - (deadline - effective_timeout - 60))
                 logger.info(f"Execution {execution_id} still running ({elapsed}s elapsed, poll #{poll_count})")
 
         raise Exception(
@@ -1143,7 +1158,7 @@ class SchedulerService:
     async def _poll_and_finalize(
         self,
         execution_id: str,
-        timeout_seconds: int,
+        timeout_seconds: Optional[int],
         agent_name: str,
     ):
         """
@@ -1155,7 +1170,9 @@ class SchedulerService:
 
         Args:
             execution_id: The execution ID to poll
-            timeout_seconds: Task timeout for polling deadline
+            timeout_seconds: Task timeout for polling deadline. None ⇒ use
+                _POLL_DEADLINE_WHEN_NULL (#913 — schedule inherits per-agent
+                value, which the scheduler does not have locally).
             agent_name: Agent name for logging and events
         """
         try:
@@ -1350,7 +1367,7 @@ class SchedulerService:
         schedule_id: str,
         agent_name: str,
         message: str,
-        timeout_seconds: int,
+        timeout_seconds: Optional[int],
         model: str,
         allowed_tools: list,
         next_attempt_number: int

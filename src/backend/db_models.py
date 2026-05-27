@@ -113,7 +113,10 @@ class ScheduleCreate(BaseModel):
     enabled: bool = True
     timezone: str = "UTC"
     description: Optional[str] = None
-    timeout_seconds: int = 900  # Default 15 minutes
+    # #913: None means "use the agent's `execution_timeout_seconds`". Storing
+    # NULL is what makes per-agent timeout actually effective for scheduled
+    # runs — the old default of 900 silently masked PUT /api/agents/{name}/timeout.
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001)
@@ -143,7 +146,8 @@ class Schedule(BaseModel):
     updated_at: datetime
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = None
-    timeout_seconds: int = 900  # Default 15 minutes
+    # #913: NULL = inherit from agent_ownership.execution_timeout_seconds.
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001). 0 = disabled (default, #476), 1-5 opt-in.

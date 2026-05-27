@@ -2066,6 +2066,40 @@ def _migrate_fix_retention_index_status_values(cursor, conn):
     conn.commit()
 
 
+def _migrate_null_legacy_schedule_timeouts(cursor, conn):
+    """Issue #913: NULL out legacy default schedule timeouts so the
+    per-agent value actually takes effect.
+
+    Before #913, `agent_schedules.timeout_seconds` was always populated
+    (DEFAULT 900, later rewritten to 3600 by
+    `_migrate_default_execution_timeout_to_3600`). The scheduler passed
+    that value directly to `/api/internal/execute-task`, which meant the
+    backend's per-agent fallback at `task_execution_service.py:281` was
+    dead code on the scheduler path — and `PUT /api/agents/{name}/timeout`
+    was silently ineffective for scheduled runs.
+
+    The fix at the code layer is to round-trip None through the scheduler
+    so the backend's per-agent fallback fires. But existing rows still
+    carry a concrete 900/3600 value that came from the platform default,
+    not from an operator choice — so the canary harness keeps firing S-03
+    (slot TTL below per-agent floor) and E-01 (terminal-state closure)
+    until those rows are cleared.
+
+    We null out only rows whose value matches one of the historical
+    defaults (900, 3600). Operators who explicitly set a different value
+    are untouched. Same fidelity tradeoff as
+    `_migrate_default_execution_timeout_to_3600` — accepted there for
+    #665, accepted here for #913.
+
+    Idempotent: subsequent runs find no matching rows and no-op.
+    """
+    cursor.execute(
+        "UPDATE agent_schedules SET timeout_seconds = NULL "
+        "WHERE timeout_seconds IN (900, 3600)"
+    )
+    conn.commit()
+
+
 def _migrate_default_execution_timeout_to_3600(cursor, conn):
     """Issue #665: bump default chat execution timeout from 15min → 60min.
 
@@ -2213,4 +2247,7 @@ MIGRATIONS = [
     ("agent_ownership_soft_delete", _migrate_agent_ownership_soft_delete),
     ("execution_retry_count", _migrate_execution_retry_count),
     ("agent_schedules_soft_delete", _migrate_agent_schedules_soft_delete),
+    # #913 — must come AFTER default_execution_timeout_to_3600 so we null out
+    # both 900 (legacy) and 3600 (post-#665 rewrite) in one pass.
+    ("null_legacy_schedule_timeouts", _migrate_null_legacy_schedule_timeouts),
 ]

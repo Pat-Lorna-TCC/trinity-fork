@@ -173,7 +173,9 @@ TABLES = {
             updated_at TEXT NOT NULL,
             last_run_at TEXT,
             next_run_at TEXT,
-            timeout_seconds INTEGER DEFAULT 3600,
+            -- #913: NULL ⇒ inherit from agent_ownership.execution_timeout_seconds.
+            -- Dropped the DEFAULT 3600 that masked per-agent timeout for cron.
+            timeout_seconds INTEGER,
             allowed_tools TEXT,
             model TEXT,
             max_retries INTEGER DEFAULT 0,
