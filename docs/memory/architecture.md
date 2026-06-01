@@ -594,7 +594,7 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/access-policy` | Get cross-channel access policy (#311) |
 | PUT | `/api/agents/{name}/access-policy` | Set `require_email` / `open_access` flags |
 | GET | `/api/agents/{name}/access-requests` | List pending access requests |
-| POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares) or reject |
+| POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares + fires fire-and-forget approval notification back on the requester's originating channel for telegram/slack/whatsapp, #951) or reject |
 
 ### Schedules (12 endpoints)
 | Method | Path | Description |
@@ -1018,6 +1018,7 @@ ALTER TABLE telegram_chat_links ADD COLUMN verified_at TEXT;
 - `ChannelAdapter.resolve_verified_email()` translates native channel identity → verified email.
 - `message_router` runs a single gate: owner/admin/`agent_sharing` → `open_access` → upsert pending `access_requests` row.
 - Approving a request inserts into `agent_sharing` and (if email auth is enabled) whitelists the email.
+- Approval also fires a fire-and-forget proactive notification back to the requester on the originating channel via `proactive_message_service.send_access_grant_notification` — only for `telegram | slack | whatsapp` (web users see the change via the existing `agent_shared` WebSocket event). Notification bypasses the `allow_proactive` opt-in (the user explicitly initiated the request) and the per-recipient rate limit (one-shot, not a campaign). Outcome (`delivered` / `recipient_not_found` / channel error) is audit-logged via `AuditEventType.PROACTIVE_MESSAGE`. Failure to deliver does not roll back the approval. (#951)
 - Group chats bypass the gate; agents with both policy flags off retain legacy permissive behavior (backward compatibility).
 
 **mcp_api_keys:**
