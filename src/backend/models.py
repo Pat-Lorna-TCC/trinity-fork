@@ -364,6 +364,7 @@ class DeployLocalResponse(BaseModel):
     versioning: Optional[VersioningInfo] = None
     credentials_imported: Optional[Dict[str, str]] = None  # Files found in archive
     credentials_injected: Optional[int] = None  # Count of credentials injected
+    warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
 
