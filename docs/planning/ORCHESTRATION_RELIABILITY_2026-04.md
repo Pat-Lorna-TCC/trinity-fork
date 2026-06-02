@@ -108,6 +108,8 @@ Before scheduling Phase 2, write one page with two sections:
 
 If both fit cleanly on a postcard, the model is sound and Phase 2 proceeds. If either sprawls, the model isn't ready and the planned path remains the best one available.
 
+**Pre-postcard work**: `ParallelTaskRequest` has 15 fields, 12 of them conditional. Until those are demoted (to session/agent state, envelope headers, or out-of-band storage) or explicitly quarantined, the postcard cannot fit honestly. The demotion sequence is six small PRs documented in `ACTOR_MODEL_TASK_DEMOTION_MAP.md` — execute that first, then #945 becomes a 30-minute writeup of what shipped.
+
 ---
 
 ## Tier 0 — Fix state-corruption bugs (Sprint A)
