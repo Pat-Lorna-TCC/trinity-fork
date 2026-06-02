@@ -700,6 +700,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Status Levels**: healthy → degraded → unhealthy → critical → unknown
 - **Flow**: `docs/memory/feature-flows/agent-monitoring.md`
 
+### 12.8a Richer Agent `/health` Signal (#1020)
+- **Status**: ✅ Implemented (2026-06-02)
+- **GitHub Issue**: #1020
+- **Description**: Promote the agent container's `/health` from `{status}` + ad-hoc diagnostics to a named, contractual signal the platform acts on — an incremental step toward `TARGET_ARCHITECTURE.md` §Agent Runtime.
+- **Key Features**:
+  - New top-level fields: `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure).
+  - Counters tracked in `agent_server/state.py` (`record_task_start`/`record_task_finish`), wired at both execution chokepoints in `agent_server/routers/chat.py`. Thread-safe (concurrent tasks).
+  - `consecutive_failures` is the signal the dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness; both feed the heartbeat push (#307).
+  - Backend `monitoring_service.py` reads `consecutive_failures`/`last_task_at` into `BusinessHealthCheck` (graceful `None` default for pre-#1020 agent images).
+  - `mailbox_depth` intentionally NOT emitted — no agent-side mailbox until the actor model (#945); backend derives queue depth from `CapacityManager`.
+  - Back-compat: existing `/health` keys unchanged; new keys additive.
+
 ### 12.9 Cleanup Service for Stuck Resources
 - **Status**: ✅ Implemented (Updated 2026-03-25, Issue #129)
 - **Requirement ID**: CLEANUP-001

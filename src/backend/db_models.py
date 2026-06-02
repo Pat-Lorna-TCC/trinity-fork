@@ -848,6 +848,11 @@ class BusinessHealthCheck(BaseModel):
     stuck_execution_count: int = 0
     recent_error_rate: float = 0.0  # 0.0 - 1.0
     credential_status: Optional[str] = None  # null, "ok", "missing" (SUB-001/MON-001)
+    # #1020: richer /health signal. None when the agent image predates #1020
+    # (older agents omit these keys). `consecutive_failures` is the signal the
+    # dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness.
+    consecutive_failures: Optional[int] = None
+    last_task_at: Optional[str] = None
     checked_at: str
 
 

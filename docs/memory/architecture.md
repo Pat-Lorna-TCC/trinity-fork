@@ -365,7 +365,7 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
 **Internal Server:** `agent-server.py`
 - FastAPI app on port 8000
 - `/api/chat` - Claude Code execution (messages persisted to database)
-- `/health` - Health check
+- `/health` - Health check. Beyond `{status}`, returns a richer signal (#1020): `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure — consumed by the dispatch circuit breaker #526 and fleet-health #307), plus the #333 `diagnostics` gauges. `mailbox_depth` is intentionally NOT emitted — there is no agent-side mailbox until the actor model (#945); the backend derives queue depth from `CapacityManager`. Counters live in `agent_server/state.py` (`record_task_start`/`record_task_finish`); the backend reads `consecutive_failures`/`last_task_at` in `monitoring_service.py` (graceful default for pre-#1020 agent images).
 - `/api/credentials/update` - Hot-reload credentials
 - `/api/chat/session` - Context window stats
 - `/api/files` - List workspace files (recursive tree structure)
