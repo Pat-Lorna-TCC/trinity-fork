@@ -4,7 +4,7 @@ Agent chat and activity routes for the Trinity backend.
 Includes execution queue integration to prevent parallel execution on the same agent.
 """
 from fastapi import APIRouter, Depends, HTTPException, Header
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 import json
 import logging
@@ -24,6 +24,7 @@ from services.capacity_manager import (
     PersistentTaskPayload,
     get_capacity_manager,
 )
+from services import idempotency_service
 from services.task_execution_service import (
     _compute_context_used,
     get_task_execution_service,
@@ -84,7 +85,8 @@ async def chat_with_agent(
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
     x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None)
+    x_mcp_key_name: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None),
 ):
     """
     Proxy chat messages to agent's internal web server and persist to database.
@@ -108,6 +110,46 @@ async def chat_with_agent(
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate
+    # requests before consuming a capacity slot. The header is optional — when
+    # absent, dedup is off and the request proceeds normally (back-compat).
+    idem = idempotency_service.begin(
+        idempotency_service.make_agent_scope(name), idempotency_key
+    )
+    idem_done = False
+    if idem.replay:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="idempotent_replay",
+            source="mcp" if x_via_mcp else "api",
+            actor_user=current_user if not x_source_agent else None,
+            actor_agent_name=x_source_agent,
+            mcp_key_id=x_mcp_key_id,
+            mcp_key_name=x_mcp_key_name,
+            target_type="agent",
+            target_id=name,
+            endpoint=f"/api/agents/{name}/chat",
+            details={
+                "idempotency_key": idempotency_key,
+                "execution_id": idem.execution_id,
+                "in_flight": idem.in_flight,
+            },
+        )
+        if idem.in_flight:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "request_in_progress",
+                    "message": "A request with this Idempotency-Key is still being processed.",
+                    "execution_id": idem.execution_id,
+                },
+            )
+        return JSONResponse(
+            content=idem.snapshot
+            or {"execution": {"task_execution_id": idem.execution_id}},
+            headers={"X-Idempotent-Replay": "true"},
+        )
 
     # Determine execution source
     if x_source_agent:
@@ -168,6 +210,9 @@ async def chat_with_agent(
         )
     except CapacityFull as e:
         logger.warning(f"[Chat] Agent '{name}' at capacity, rejecting request (reason={e.reason})")
+        # Nothing dispatched — release the idempotency claim so the caller can
+        # retry with the same key once capacity frees up (#525).
+        idempotency_service.fail(idem)
         raise HTTPException(
             status_code=429,
             detail={
@@ -218,6 +263,7 @@ async def chat_with_agent(
         subscription_id=_exec_subscription_id,
     )
     task_execution_id = task_execution.id if task_execution else None
+    idempotency_service.attach_execution(idem, task_execution_id)
     logger.info(f"[Chat] Created task execution {task_execution_id} for {triggered_by} call on agent '{name}'")
 
     # Broadcast collaboration event if this is agent-to-agent communication
@@ -458,6 +504,11 @@ async def chat_with_agent(
             "was_queued": is_queued
         }
 
+        # RELIABILITY-006 (#525): store the result so a duplicate Idempotency-Key
+        # replays this exact response instead of dispatching a second execution.
+        idempotency_service.complete(idem, task_execution_id, response_data)
+        idem_done = True
+
         return response_data
     except BackendAgentCallBudgetExhausted as _budget_e:
         # #904 RC-1: backend agent-call budget exhausted. Translate to a
@@ -624,6 +675,11 @@ async def chat_with_agent(
         # CAPACITY-CONSOLIDATE (#428): single release covers both the
         # SlotService N-ary counter and the in-memory overflow bookkeeping.
         await capacity.release(name, execution.id)
+        # RELIABILITY-006 (#525): on any non-success exit, release the in-flight
+        # idempotency claim so the caller can legitimately retry (no-op on the
+        # success path, where complete() already finalized it).
+        if not idem_done:
+            idempotency_service.fail(idem)
 
 
 async def _persist_chat_session(
@@ -897,7 +953,8 @@ async def execute_parallel_task(
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
     x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None)
+    x_mcp_key_name: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None),
 ):
     """
     Execute a stateless task in parallel mode (no conversation context).
@@ -944,6 +1001,48 @@ async def execute_parallel_task(
     else:
         source = ExecutionSource.USER
         triggered_by = "manual"
+
+    # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicates before
+    # any file upload / execution-record creation. Optional header — absent →
+    # dedup off, request proceeds normally. Post-dispatch failures intentionally
+    # leave the claim in place (a duplicate within the 24h TTL gets a 409 with
+    # the original execution_id to poll); only upfront at-capacity rejections
+    # release the claim so the caller can retry once capacity frees.
+    idem = idempotency_service.begin(
+        idempotency_service.make_agent_scope(name), idempotency_key
+    )
+    if idem.replay:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="idempotent_replay",
+            source="mcp" if x_via_mcp else "api",
+            actor_user=current_user if not x_source_agent else None,
+            actor_agent_name=x_source_agent,
+            mcp_key_id=x_mcp_key_id,
+            mcp_key_name=x_mcp_key_name,
+            target_type="agent",
+            target_id=name,
+            endpoint=f"/api/agents/{name}/task",
+            details={
+                "idempotency_key": idempotency_key,
+                "execution_id": idem.execution_id,
+                "in_flight": idem.in_flight,
+            },
+        )
+        if idem.in_flight:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "request_in_progress",
+                    "message": "A request with this Idempotency-Key is still being processed.",
+                    "execution_id": idem.execution_id,
+                },
+            )
+        return JSONResponse(
+            content=idem.snapshot
+            or {"task_execution_id": idem.execution_id, "async_mode": bool(request.async_mode)},
+            headers={"X-Idempotent-Replay": "true"},
+        )
 
     # (#364) File upload processing — done synchronously before the async/sync
     # fork so bytes are decoded and written to the container before we return
@@ -1006,6 +1105,7 @@ async def execute_parallel_task(
         subscription_id=_task_subscription_id,
     )
     execution_id = execution.id if execution else None
+    idempotency_service.attach_execution(idem, execution_id)
 
     # Broadcast collaboration event if this is agent-to-agent communication
     # Track collaboration activity FIRST (belongs to source agent) - mirrors /api/chat pattern
@@ -1120,6 +1220,7 @@ async def execute_parallel_task(
                         f"and backlog is full"
                     ),
                 )
+            idempotency_service.fail(idem)
             raise HTTPException(
                 status_code=429,
                 detail=(
@@ -1132,7 +1233,7 @@ async def execute_parallel_task(
             logger.info(
                 f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
             )
-            return {
+            _queued_payload = {
                 "status": "queued",
                 "execution_id": execution_id,
                 "agent_name": name,
@@ -1142,6 +1243,8 @@ async def execute_parallel_task(
                 ),
                 "async_mode": True,
             }
+            idempotency_service.complete(idem, execution_id, _queued_payload)
+            return _queued_payload
         slot_acquired = True  # admitted — preserved for downstream finally semantics
 
         # Issue #279: done callback surfaces unhandled BG task exceptions.
@@ -1169,13 +1272,15 @@ async def execute_parallel_task(
         bg_task.add_done_callback(_on_task_done)
 
         logger.info(f"[Task Async] Started background task for agent '{name}', execution_id={execution_id}")
-        return {
+        _accepted_payload = {
             "status": "accepted",
             "execution_id": execution_id,
             "agent_name": name,
             "message": "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
             "async_mode": True,
         }
+        idempotency_service.complete(idem, execution_id, _accepted_payload)
+        return _accepted_payload
 
     # ---- Sync mode: pre-acquire capacity to mirror async branch (issue #498).
     # On success, delegate to TaskExecutionService with slot_already_held=True
@@ -1223,6 +1328,7 @@ async def execute_parallel_task(
                     f"and backlog is full"
                 ),
             )
+        idempotency_service.fail(idem)
         raise HTTPException(
             status_code=429,
             detail=(
@@ -1315,6 +1421,7 @@ async def execute_parallel_task(
         if sync_chat_session_id:
             sync_response_data["chat_session_id"] = sync_chat_session_id
         sync_response_data["task_execution_id"] = execution_id
+        idempotency_service.complete(idem, execution_id, sync_response_data)
         return sync_response_data
 
     # ---- Slot acquired immediately — existing sync path (EXEC-024) ----
@@ -1389,6 +1496,7 @@ async def execute_parallel_task(
     # Add database execution ID to response for frontend tracking
     response_data["task_execution_id"] = execution_id
 
+    idempotency_service.complete(idem, execution_id, response_data)
     return response_data
 
 

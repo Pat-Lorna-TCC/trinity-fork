@@ -1090,6 +1090,23 @@ TABLES = {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """,
+    # -------------------------------------------------------------------------
+    # Idempotency (RELIABILITY-006, #525)
+    # -------------------------------------------------------------------------
+    # One row per claimed (scope, key). PRIMARY KEY gives the atomic-claim
+    # uniqueness; rows past the 24h TTL are purged by the cleanup service.
+    "idempotency_keys": """
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            scope TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            execution_id TEXT,
+            status TEXT NOT NULL,
+            response_snapshot TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (scope, idempotency_key)
+        )
+    """,
 }
 
 # =============================================================================
@@ -1283,6 +1300,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_invariant ON canary_violations(invariant_id, snapshot_time DESC)",
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_severity ON canary_violations(severity, snapshot_time DESC)",
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_snapshot ON canary_violations(snapshot_time DESC)",
+
+    # Idempotency key index (RELIABILITY-006, #525) — drives the TTL purge sweep
+    "CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)",
 
     # Subscription credentials indexes (SUB-001)
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",

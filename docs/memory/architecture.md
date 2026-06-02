@@ -939,6 +939,8 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 17. **Non-root containers** — every Trinity-built image MUST end with a `USER` directive switching to a non-root user. Backend additionally requires `group_add: ${DOCKER_GID:-999}` in compose for Docker socket access on Linux. New service Dockerfiles failing this invariant are rejected at review. Established by #874. CI guards in `.github/workflows/container-security.yml` (path-filtered, runs unconditionally on `docker/**`, `docker-compose*.yml`, `scripts/deploy/start.sh`, `src/mcp-server/Dockerfile` changes — independent of the `ui`-label-gated e2e workflow so backend infra PRs can't silently skip them): `verify-non-root` execs the running backend/scheduler/mcp-server containers (those hold the credentials and the `docker.sock` mount), asserts UID 1000, and proves `group_add` is wired through on Linux by running `docker.from_env().ping()` from inside the backend (NOT a `/api/agents` HTTP probe — `list_all_agents_fast` swallows Docker exceptions and returns `[]`, which made the original gate a false positive); `verify-prod-frontend-uid` builds the prod frontend image out-of-band (start.sh boots the Vite-dev image) and asserts its UID is 101 (`nginxinc/nginx-unprivileged`). Dev-only images (`docker/frontend/Dockerfile`) are intentionally exempt — they have no production attack surface. Existing deployments upgrading through this change must re-own their data path and `agent-configs` volume per [docs/migrations/NON_ROOT_CONTAINERS_2026-05.md](../migrations/NON_ROOT_CONTAINERS_2026-05.md).
 
+18. **Trigger boundaries accept `Idempotency-Key`** (RELIABILITY-006, #525) — every producer boundary that creates an execution accepts an optional `Idempotency-Key` header and routes it through `services/idempotency_service.py` (`begin`/`complete`/`fail`) backed by the `idempotency_keys` table. The same `(scope, key)` within 24h yields one execution; duplicates short-circuit with the original result + `X-Idempotent-Replay: true` (in-flight duplicate → 409). Enforcement lives at the **router** layer, not solely in `TaskExecutionService`, because sync `/chat` runs an inline path and `/api/webhooks/{token}` creates no execution. Wired boundaries: `/chat`, `/task`, `/api/internal/execute-task`, `/api/webhooks/{token}` (auto-derives `(token, body_hash)`), `/api/agents/{name}/fan-out`, and the scheduler (`Idempotency-Key: sched:{execution_id}`) + MCP `chat_with_agent`/`fan_out` (deterministic key over call args). **Any new trigger type must accept an idempotency key before merge** — the dedup layer is fail-open (a key never blocks a real execution), so the cost of adding it is one `begin/complete/fail` triple.
+
 ---
 
 ## Database Schema
@@ -1715,6 +1717,35 @@ CREATE INDEX idx_canary_violations_snapshot
   drives the dashboard tiles.
 - Populated by `services/canary_service.py` on a 5-min loop or on-demand
   via `POST /api/canary/run-cycle`.
+
+**idempotency_keys:** (RELIABILITY-006 / Issue #525 — NEW: 2026-06-02)
+```sql
+CREATE TABLE idempotency_keys (
+    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" | "webhook:{token}"
+    idempotency_key TEXT NOT NULL,    -- caller-supplied or derived
+    execution_id TEXT,               -- nullable (webhook short-circuit has none)
+    status TEXT NOT NULL,            -- 'in_flight' | 'completed'
+    response_snapshot TEXT,          -- JSON of the original response, for replay
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, idempotency_key)
+);
+CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);
+```
+
+**idempotency_keys Features:**
+- `PRIMARY KEY (scope, idempotency_key)` IS the atomic claim — `claim()` INSERTs
+  an `in_flight` row; the loser of a concurrent race catches `IntegrityError`
+  and reads the surviving row (cross-process safe across uvicorn workers + the
+  standalone scheduler, which share one SQLite file).
+- Lifecycle: `claim` → (`attach_execution`) → `complete` (status→`completed`,
+  stores `response_snapshot`) or `release` (delete in_flight so a failed first
+  attempt can retry; never deletes a `completed` row).
+- A row older than the 24h TTL is treated as expired and re-claimed as new.
+- Purged on the 24h window by the cleanup service
+  (`db.idempotency_purge_expired`, report field `idempotency_keys_purged`).
+- DB layer `db/idempotency.py`; orchestration `services/idempotency_service.py`
+  (key derivation + `begin`/`complete`/`fail`). See Invariant #18.
 
 ### Redis
 

@@ -135,6 +135,7 @@ from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.sync_state import SyncStateOperations
+from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
 
 
@@ -293,6 +294,7 @@ class DatabaseManager:
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
+        self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
 
     # =========================================================================
@@ -2054,6 +2056,30 @@ class DatabaseManager:
     def get_canary_stats(self, start_time: str = None, end_time: str = None):
         """Aggregate canary violation counts by invariant_id and severity."""
         return self._canary_ops.stats_by_invariant(start_time=start_time, end_time=end_time)
+
+    # =========================================================================
+    # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
+    # =========================================================================
+
+    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24) -> dict:
+        """Atomically claim (scope, key). See IdempotencyOperations.claim."""
+        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours)
+
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+        """Record the execution_id for an in-flight idempotency claim."""
+        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+        """Mark an idempotency claim completed and store the replay snapshot."""
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+
+    def idempotency_release(self, scope: str, key: str) -> None:
+        """Delete an in-flight idempotency claim so a failed attempt can retry."""
+        return self._idempotency_ops.release(scope, key)
+
+    def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
+        """Purge idempotency rows older than ttl_hours. Returns rows removed."""
+        return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
 
     # =========================================================================
     # Sequential Agent Loops (delegated to db/loops.py) - #740
