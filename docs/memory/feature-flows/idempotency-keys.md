@@ -3,6 +3,8 @@
 > **Updated 2026-06-02 (#525, PR #1019):** New cross-cutting primitive — Architectural Invariant #18. Every producer boundary that creates an execution accepts an optional `Idempotency-Key` header; the same `(scope, key)` within 24h yields exactly one execution. Duplicates short-circuit with the original response + `X-Idempotent-Replay: true`; an in-flight duplicate returns 409. The layer is **fail-open** — a dedup-layer error never blocks a real execution.
 >
 > **Note:** this is unrelated to the "idempotent retry" behavior of the dispatch circuit breaker (#526) and the in-line reader-race auto-retry (#678). Those reuse an `execution_id`; this feature dedups at the *producer boundary* before any execution exists.
+>
+> **Updated 2026-06-04 (#1051):** `chat_with_agent` was decomposed into `_admit_chat_request` / `_prepare_chat_execution` / `_run_chat_and_finalize`. The idempotency gate now lives in `_admit_chat_request`, and the dispatch-breaker-open `/chat` deny path **also releases the claim** (`fail(idem)`), joining the capacity-full path. `routers/chat.py` line anchors below refreshed for the new layout.
 
 ## Overview
 A `(scope, idempotency_key)` claim is taken atomically before an execution is dispatched at every trigger boundary. A first-seen key proceeds and dispatches; a duplicate within the 24h TTL short-circuits and replays the original result instead of dispatching a second execution. This closes the producer-boundary dedup gap that the unified execution funnel made more acute: webhook re-deliveries, MCP client transport retries, and scheduler→backend network blips no longer create phantom executions.
@@ -15,8 +17,8 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 
 | Boundary | Scope | Key source | File |
 |----------|-------|-----------|------|
-| `POST /api/agents/{name}/chat` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:80` |
-| `POST /api/agents/{name}/task` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:948` |
+| `POST /api/agents/{name}/chat` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:148` |
+| `POST /api/agents/{name}/task` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:1259` |
 | `POST /api/internal/execute-task` | `agent:{name}` | header (set by scheduler) | `routers/internal.py:251` |
 | `POST /api/webhooks/{token}` | `webhook:{token}` | header **or auto-derived** `(token, body_hash)` | `routers/webhooks.py:248` |
 | `POST /api/agents/{name}/fan-out` | `agent:{name}` | optional `Idempotency-Key` header | `routers/fan_out.py:134` |
@@ -56,9 +58,9 @@ Time math uses `iso_cutoff(hours)` and `utc_now_iso()` from `utils/helpers.py` (
   - `fail(decision)` — `idempotency_service.py:132`. Releases a fresh in-flight claim so a failed first attempt can retry; no-op on replay / disabled.
 
 ### Router flow (representative — `/chat`, `routers/chat.py`)
-1. `begin(make_agent_scope(name), idempotency_key)` at `chat.py:117` — gated before consuming a capacity slot.
-2. **Replay path** (`idem.replay`, `chat.py:121`): writes a `EXECUTION / idempotent_replay` platform-audit event; if `idem.in_flight`, raises `409 {error: "request_in_progress", execution_id}` (`chat.py:139`); otherwise returns `idem.snapshot` (or a minimal `{execution.task_execution_id}`) with header `X-Idempotent-Replay: true` (`chat.py:148-152`).
-3. **Fresh path**: dispatch through `CapacityManager`. `attach_execution(idem, task_execution_id)` at `chat.py:266`. On a final response, `complete(idem, task_execution_id, response_data)` at `chat.py:509` / `chat.py:1424` / `chat.py:1499`. On an upfront at-capacity rejection (nothing dispatched), `fail(idem)` at `chat.py:215` / `chat.py:682` so the caller can retry once capacity frees.
+1. `begin(make_agent_scope(name), idempotency_key)` at `chat.py:148` (inside `_admit_chat_request`) — gated before consuming a capacity slot.
+2. **Replay path** (`idem.replay`, `chat.py:151`): writes a `EXECUTION / idempotent_replay` platform-audit event; if `idem.in_flight`, raises `409 {error: "request_in_progress", execution_id}` (`chat.py:169`); otherwise returns `idem.snapshot` (or a minimal `{execution.task_execution_id}`) with header `X-Idempotent-Replay: true` (`chat.py:181`).
+3. **Fresh path**: dispatch through `CapacityManager`. `attach_execution(idem, task_execution_id)` at `chat.py:361` (inside `_prepare_chat_execution`). On a final response, `complete(idem, task_execution_id, response_data)` at `chat.py:755` (inside `_run_chat_and_finalize`). On an upfront rejection where **nothing was dispatched** — capacity-full (`chat.py:264`) **or** dispatch-breaker-open (`chat.py:216`, #526, added by #1051) — `fail(idem)` releases the claim so the caller can retry with the same key once capacity frees or the breaker recovers.
 
 The `/task` boundary mirrors this (`chat.py:1005-1045` replay block, `complete` at `chat.py:1246`/`1282`/`1424`/`1499`, `fail` at `chat.py:1223`/`1331`). Post-dispatch failures intentionally leave the claim in place — a duplicate within the TTL gets a 409 with the original `execution_id` to poll.
 

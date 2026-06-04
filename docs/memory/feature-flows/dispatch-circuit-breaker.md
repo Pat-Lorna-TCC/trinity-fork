@@ -59,6 +59,8 @@ routers/chat.py
    /chat (~160)   : PURE-READ gate — DispatchBreaker(agent).to_dict()["state"]=="open"
                     ─► 503 immediately (does NOT consume a probe; /chat never feeds
                     the breaker, so it must not drain its recovery probe — #526 F1).
+                    Nothing dispatched ─► fail(idem) releases the idempotency claim
+                    so the same key can retry once the breaker recovers (#1051).
                     acquire() runs WITHOUT breaker_enabled.
    /task (async ~1127, sync ~1241): acquire(..., breaker_enabled=cb_enabled)
           │
