@@ -182,9 +182,10 @@
               <FoldersPanel :agent-name="agent.name" :agent-status="agent.status" :can-share="agent.can_share" />
             </div>
 
-            <!-- Guardrails Tab Content (GUARD-001 UI, #967) -->
-            <div v-if="activeTab === 'guardrails' && agent.can_share">
-              <GuardrailsPanel :agent-name="agent.name" :notify="showNotification" />
+            <!-- Settings Tab Content (#1108) — sectioned home for per-agent
+                 config; Guardrails (GUARD-001 UI, #967) is section #1 -->
+            <div v-if="activeTab === 'settings' && agent.can_share">
+              <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
             </div>
 
           </div>
@@ -263,7 +264,7 @@ import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
-import GuardrailsPanel from '../components/GuardrailsPanel.vue'
+import SettingsPanel from '../components/settings/SettingsPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
@@ -305,7 +306,14 @@ const error = ref('')
 const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
-const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
+const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
+// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
+const TAB_ALIASES = { guardrails: 'settings' }
+// Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
+function resolveDeepLinkTab(requested) {
+  const resolved = TAB_ALIASES[requested] || requested
+  return DEEP_LINK_TABS.includes(resolved) ? resolved : null
+}
 // Tabs that need a full-viewport flex layout (input pinned to bottom).
 // Chat + Session both render ChatMessages which depends on flex-1 grow.
 const isFullscreenTab = computed(() => activeTab.value === 'chat' || activeTab.value === 'session')
@@ -634,9 +642,9 @@ const visibleTabs = computed(() => {
     tabs.push({ id: 'folders', label: 'Folders' })
   }
 
-  // Guardrails - owner-only (GUARD-001 UI, #967)
+  // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
   if (agent.value?.can_share && !isSystem) {
-    tabs.push({ id: 'guardrails', label: 'Guardrails' })
+    tabs.push({ id: 'settings', label: 'Settings' })
   }
 
   // Info at the end (reference/metadata)
@@ -1012,9 +1020,9 @@ onMounted(async () => {
 
   // Handle tab query param (from Timeline click navigation)
   if (route.query.tab) {
-    const requestedTab = route.query.tab
-    if (DEEP_LINK_TABS.includes(requestedTab)) {
-      activeTab.value = requestedTab
+    const resolvedTab = resolveDeepLinkTab(route.query.tab)
+    if (resolvedTab) {
+      activeTab.value = resolvedTab
     }
   }
 })
@@ -1036,9 +1044,9 @@ onActivated(async () => {
   // Handle tab query param (EXEC-023: Continue as Chat navigation)
   // Must also check here since onMounted doesn't fire for cached components
   if (route.query.tab) {
-    const requestedTab = route.query.tab
-    if (DEEP_LINK_TABS.includes(requestedTab)) {
-      activeTab.value = requestedTab
+    const resolvedTab = resolveDeepLinkTab(route.query.tab)
+    if (resolvedTab) {
+      activeTab.value = resolvedTab
     }
   }
 
