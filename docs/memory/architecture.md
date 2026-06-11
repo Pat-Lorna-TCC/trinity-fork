@@ -1492,7 +1492,7 @@ Bridges (members of **both** networks): `backend` (primary HTTP API — Redis on
 ## Container Security
 
 - **Non-root execution** (Invariant #17, #874): backend and scheduler as `trinity` (UID 1000), MCP server as `node` (UID 1000), frontend as `nginx` (UID 101), agents as `developer` (UID 1000). Backend needs `group_add: ${DOCKER_GID:-999}` for Docker socket access on Linux.
-- `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`; `security_opt: no-new-privileges:true`; tmpfs `/tmp` with `noexec,nosuid`; no external UI port exposure; network isolation per Network Topology above.
+- `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`; `security_opt: no-new-privileges:true`; tmpfs `/tmp` with `noexec,nosuid` (100 MB RAM-backed — heavy scratch like pip/npm/ML wheels is redirected via a default `TMPDIR=/home/developer/.tmp` on the disk-backed home volume, created at start by `startup.sh`; mount spec + TMPDIR default live in `services/agent_service/capabilities.py` so create/recreate/system-agent can't drift, #1098); no external UI port exposure; network isolation per Network Topology above.
 - **Internal API security (C-003)**: `/api/internal/` endpoints (scheduler, agent containers) require the `X-Internal-Secret` header; falls back to `SECRET_KEY` if `INTERNAL_API_SECRET` unset.
 - **WebSocket security (C-002, #550)**: single-use ticket auth — see [Real-time Delivery](#real-time-delivery-reliability-003-306).
 - **Frontend XSS (H-005)**: all markdown rendering uses DOMPurify via `utils/markdown.js`; no direct `v-html` with unsanitized content.

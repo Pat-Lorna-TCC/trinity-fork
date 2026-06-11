@@ -12,6 +12,16 @@ if [ -f /opt/trinity/hooks/write-runtime-config.py ]; then
         echo "Warning: failed to render guardrails-runtime.json (hooks will fall back to baseline)"
 fi
 
+# === Scratch space: ensure TMPDIR exists on the home volume (#1098) ===
+# /tmp is a 100 MB RAM tmpfs mounted noexec,nosuid — too small and non-exec for
+# pip/npm/build scratch (ML wheels hit "No space left on device"). The backend
+# sets TMPDIR to a disk-backed, exec-capable path on the home volume; create it
+# (idempotent) so tools that honor TMPDIR land there. Runs as `developer`, the
+# UID-1000 owner of /home/developer.
+AGENT_TMPDIR="${TMPDIR:-/home/developer/.tmp}"
+mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/null || \
+    echo "Warning: could not create TMPDIR ${AGENT_TMPDIR}; scratch will fall back to /tmp"
+
 # Initialize from GitHub repository if specified
 if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
     echo "Initializing agent from GitHub repository: ${GITHUB_REPO}"

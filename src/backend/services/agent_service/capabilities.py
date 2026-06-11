@@ -64,3 +64,23 @@ PROHIBITED_CAPABILITIES: list[str] = [
     'SYS_MODULE',        # Load kernel modules - kernel compromise
     'SYS_BOOT',          # Reboot system
 ]
+
+
+# Agent /tmp mount + scratch-space defaults (#1098)
+# -----------------------------------------------------------------------------
+# /tmp is a small RAM-backed tmpfs, hardened noexec,nosuid. It is deliberately
+# tiny and non-exec so a compromised agent can't stage/execute payloads there.
+# The catch: heavy scratch (pip/npm install, compiling C extensions, ML wheels
+# like torch/transformers) must NOT land on /tmp — it hits "No space left on
+# device" at 100 MB, and "Permission denied" on the noexec flag.
+#
+# Defined here (single source of truth) so the create path (crud.py) and the
+# recreate path (lifecycle.py) can't drift — both import these constants.
+AGENT_TMPFS_MOUNT: dict[str, str] = {'/tmp': 'noexec,nosuid,size=100m'}
+
+# Default TMPDIR redirects scratch onto the disk-backed, exec-capable agent
+# home volume. pip / npm / most build tooling honor TMPDIR, so this dodges both
+# the 100 MB cap and noexec in one move while keeping /tmp's hardened posture.
+# The directory is created (writable by UID 1000) at container start by
+# docker/base-image/startup.sh, so existing agents pick it up on restart.
+AGENT_DEFAULT_TMPDIR: str = '/home/developer/.tmp'

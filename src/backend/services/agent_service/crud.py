@@ -35,6 +35,7 @@ from services.github_service import GitHubService, GitHubError
 from utils.helpers import sanitize_agent_name, utc_now_iso
 from .helpers import validate_base_image
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
+from .capabilities import AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR
 
 logger = logging.getLogger(__name__)
 
@@ -478,7 +479,11 @@ async def create_agent_internal(
         'TEMPLATE_NAME': config.template if config.template else '',
         # Multi-runtime support
         'AGENT_RUNTIME': config.runtime or 'claude-code',
-        'AGENT_RUNTIME_MODEL': config.runtime_model or ''
+        'AGENT_RUNTIME_MODEL': config.runtime_model or '',
+        # #1098: redirect scratch (pip/npm/build, ML wheels) off the 100 MB
+        # noexec /tmp tmpfs onto the disk-backed, exec-capable home volume.
+        # The dir is created at container start by startup.sh.
+        'TMPDIR': AGENT_DEFAULT_TMPDIR,
     }
 
     # GUARD-001: per-agent guardrails overrides (empty by default; baseline
@@ -725,8 +730,9 @@ async def create_agent_internal(
                 # Add back only the capabilities needed for the mode
                 cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
                 read_only=False,
-                # Always apply noexec,nosuid to /tmp for security
-                tmpfs={'/tmp': 'noexec,nosuid,size=100m'},
+                # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+                # is redirected off this tiny tmpfs via the TMPDIR env var).
+                tmpfs=AGENT_TMPFS_MOUNT,
                 network='trinity-agent-network',
                 mem_limit=config.resources.get('memory') or _get_default_resource('memory'),
                 # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter

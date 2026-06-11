@@ -22,7 +22,7 @@ from services.docker_service import (
 )
 from services.docker_utils import container_reload, container_start, containers_run
 from services.settings_service import get_anthropic_api_key
-from services.agent_service.lifecycle import FULL_CAPABILITIES
+from services.agent_service.lifecycle import FULL_CAPABILITIES, AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,10 @@ class SystemAgentService:
             'ENABLE_SSH': 'true',
             'ENABLE_AGENT_UI': 'true',
             'AGENT_SERVER_PORT': '8000',
-            'TEMPLATE_NAME': SYSTEM_AGENT_TEMPLATE
+            'TEMPLATE_NAME': SYSTEM_AGENT_TEMPLATE,
+            # #1098: redirect scratch off the 100 MB noexec /tmp tmpfs onto the
+            # disk-backed home volume (dir created at start by startup.sh).
+            'TMPDIR': AGENT_DEFAULT_TMPDIR,
         }
 
         # OpenTelemetry Configuration (enabled by default)
@@ -250,8 +253,9 @@ class SystemAgentService:
             cap_drop=['ALL'],
             # System agent gets full capabilities for operational tasks
             cap_add=FULL_CAPABILITIES,
-            # Always apply noexec,nosuid to /tmp for security
-            tmpfs={'/tmp': 'noexec,nosuid,size=100m'},
+            # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+            # redirected off this tiny tmpfs via the TMPDIR env var).
+            tmpfs=AGENT_TMPFS_MOUNT,
         )
 
         # Register ownership with is_system=True
