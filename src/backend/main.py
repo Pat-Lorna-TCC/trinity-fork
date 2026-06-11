@@ -491,6 +491,29 @@ async def lifespan(app: FastAPI):
             print(f"Error starting heartbeat watch loop: {e}")
     asyncio.create_task(_start_heartbeat_watch_delayed())
 
+    # MON-001 / #1121: resume the authoritative 30s fleet-monitoring loop from
+    # its persisted setting. Previously the loop was only ever started by an
+    # admin hitting POST /api/monitoring/enable, so every backend restart
+    # silently killed it and left it off until a human re-enabled it. We now
+    # read the persisted `monitoring_config` (single source of truth, default
+    # OFF) and start the loop only when enabled — so the choice survives
+    # restarts. Staggered +12s to keep boot snappy and offset from the other
+    # delayed loops.
+    async def _start_monitoring_delayed():
+        await asyncio.sleep(12)
+        try:
+            from routers.monitoring import load_persisted_monitoring_config
+            from services.monitoring_service import start_monitoring_service
+            config = load_persisted_monitoring_config()
+            if config.enabled:
+                await start_monitoring_service(config)
+                print("Monitoring service resumed from persisted config (enabled)")
+            else:
+                print("Monitoring service not started (persisted setting disabled / default off)")
+        except Exception as e:
+            print(f"Error resuming monitoring service: {e}")
+    asyncio.create_task(_start_monitoring_delayed())
+
     # Recover orphaned regular task executions (Issue #128).
     # #748: flip the warming-up gate open in a finally block so the
     # /internal/execute-task route doesn't 503 forever if recovery raises.
@@ -662,6 +685,16 @@ async def lifespan(app: FastAPI):
         print("Session cleanup service stopped")
     except Exception as e:
         print(f"Error stopping session cleanup service: {e}")
+
+    # Shutdown fleet monitoring loop (MON-001 / #1121) — parity with the
+    # other lifespan-managed loops; no-op when it was never started.
+    try:
+        from services.monitoring_service import get_monitoring_service, stop_monitoring_service
+        if get_monitoring_service().is_running:
+            await stop_monitoring_service()
+            print("Monitoring service stopped")
+    except Exception as e:
+        print(f"Error stopping monitoring service: {e}")
 
     # Shutdown Slack transport
     try:

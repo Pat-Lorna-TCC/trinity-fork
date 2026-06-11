@@ -163,7 +163,7 @@
 
 *Monitoring & Activities:*
 - `activity_service.py` - Activity tracking and timeline
-- `monitoring_service.py` - Fleet-wide health monitoring, 30s loop — authoritative for aggregate status (MON-001)
+- `monitoring_service.py` - Fleet-wide health monitoring, 30s loop — authoritative for aggregate status; lifespan-resumed from persisted `monitoring_config`, default OFF (MON-001, #1121)
 - `monitoring_alerts.py` - Alert threshold configuration
 - `heartbeat_service.py` - Agent push-heartbeat liveness layer — see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307)
 - `operator_queue_service.py` - Operating Room sync with agent containers (OPS-001)
@@ -310,7 +310,7 @@ Services that run continuously in the backend process:
 | **Cleanup Service** | `cleanup_service.py` | Every 5 min: active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery (CLEANUP-001, #129). Also runs retention + soft-delete purge sweeps and the #740 startup orphan-loop hook — see [Soft Delete & Retention](#soft-delete-retention--recovery-834-772) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s — see [Git Sync Health](#git-sync-health-389390) |
-| **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval (30s default); authoritative for aggregate status (MON-001) |
+| **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval (30s default); authoritative for aggregate status. **Lifespan-resumed (#1121):** boot reads the persisted `monitoring_config` (staggered +12s) and starts the loop only when `enabled` — the flag is the single source of truth, **defaults OFF**, persisted by `enable`/`disable`/`PUT /config` (which also reconcile the running loop) so the choice survives restarts; `*_check_interval` rejects non-positive values (422), loop clamps sleep ≥1s (MON-001) |
 | **Heartbeat Watch Loop** | `heartbeat_service.py` | 5s loop acting on missed agent heartbeats — see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307) |
 | **Scheduler Service** | `scheduler_service.py` | APScheduler cron execution; async fire-and-forget with DB polling for status. On each cron fire, optionally invokes the agent's `~/.trinity/pre-check` (see Agent Containers) |
 | **Capacity Maintenance** | `capacity_manager.py` | `run_maintenance()` every 60s — see [Capacity & Backlog](#capacity--backlog-428) |
@@ -348,7 +348,7 @@ API: `GET`/`PUT /api/agents/{name}/circuit-breaker` (owner-only toggle), `POST .
 
 ### Heartbeat Liveness (RELIABILITY-004, #307)
 
-Additive push-heartbeat layer; the 30s `monitoring_service` loop stays authoritative for aggregate status.
+Additive push-heartbeat layer; the 30s `monitoring_service` loop (lifespan-resumed, default-off, #1121) stays authoritative for aggregate status when enabled.
 
 **Agent side** (`agent_server/heartbeat.py`): 5s loop, gated on both `TRINITY_BACKEND_URL` and `TRINITY_MCP_API_KEY` being present. POSTs `{memory_mb, active_executions, uptime_s}` to `POST /api/agents/{name}/heartbeat`, authenticated with the agent's own agent-scoped MCP key (Option B — least privilege, no master secret injected). `memory_mb` from `/proc/self/status` VmRSS (no psutil). Sleeps-first and swallows **all** exceptions — a failed beat is silent by design; the backend watch loop acts on absence.
 

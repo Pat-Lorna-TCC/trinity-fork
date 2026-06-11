@@ -46,6 +46,33 @@ _STATUS_SORT_ORDER = {"critical": 0, "unhealthy": 1, "degraded": 2, "unknown": 3
 _websocket_manager = None
 _filtered_websocket_manager = None
 
+_MONITORING_CONFIG_KEY = "monitoring_config"
+
+
+def load_persisted_monitoring_config() -> MonitoringConfig:
+    """Load the persisted monitoring config, or DEFAULT_CONFIG (default-OFF).
+
+    #1121: single reader used by GET /config, enable/disable, and the
+    lifespan resume path so they can't drift. A corrupt persisted blob
+    (or one with an out-of-range interval that fails validation) falls
+    back to the default rather than raising.
+    """
+    setting = db.get_setting(_MONITORING_CONFIG_KEY)
+    if setting and setting.value:
+        try:
+            return MonitoringConfig(**json.loads(setting.value))
+        except Exception:
+            logger.warning("Invalid persisted monitoring_config; using default", exc_info=True)
+    return DEFAULT_CONFIG
+
+
+def _persist_monitoring_enabled(enabled: bool) -> MonitoringConfig:
+    """Persist the `enabled` flag onto the stored config so the choice
+    survives backend restarts (#1121). Preserves all other fields."""
+    config = load_persisted_monitoring_config().model_copy(update={"enabled": enabled})
+    db.set_setting(_MONITORING_CONFIG_KEY, json.dumps(config.model_dump()))
+    return config
+
 
 # ============================================================================
 # Builders (extracted for unit-test coverage — see #669)
@@ -433,17 +460,7 @@ async def get_monitoring_config(
 
     Admin only.
     """
-    # Try to get from settings
-    setting = db.get_setting("monitoring_config")
-    if setting and setting.value:
-        try:
-            import json
-            config_dict = json.loads(setting.value)
-            return MonitoringConfig(**config_dict)
-        except Exception:
-            pass
-
-    return DEFAULT_CONFIG
+    return load_persisted_monitoring_config()
 
 
 @router.put("/config", response_model=MonitoringConfig)
@@ -454,57 +471,85 @@ async def update_monitoring_config(
     """
     Update monitoring configuration.
 
-    Admin only. Changes take effect on next check cycle.
+    Admin only. Interval changes take effect on the next check cycle;
+    a flipped `enabled` flag reconciles the loop immediately (#1121).
     """
-    import json
+    # #1121: `enabled` is the loop's on/off switch, but every MonitoringConfig
+    # field has a default — so a body that omits `enabled` would deserialize to
+    # `enabled=False` and silently tear down a running loop on a routine
+    # interval tweak. Only treat `enabled` as authoritative when the client
+    # explicitly sent it; otherwise preserve the persisted run-state.
+    if "enabled" not in config.model_fields_set:
+        config = config.model_copy(update={"enabled": load_persisted_monitoring_config().enabled})
 
     # Save to settings
-    config_json = json.dumps(config.model_dump())
-    db.set_setting("monitoring_config", config_json)
+    db.set_setting(_MONITORING_CONFIG_KEY, json.dumps(config.model_dump()))
 
-    # Update running service
+    # Update running service config, then reconcile its run state to the
+    # `enabled` flag so it stays the single source of truth (#1121).
+    # Start/stop are done inline (awaited) rather than via background tasks so
+    # the runtime state matches the persisted flag before we return — a
+    # backgrounded start could otherwise run after a racing disable and leave
+    # the loop up against a persisted `enabled=False`. start()/stop() do not
+    # block (create_task / cancel-a-sleeping-task).
     service = get_monitoring_service()
     service.config = config
+    if config.enabled and not service.is_running:
+        await start_monitoring_service(config)
+    elif not config.enabled and service.is_running:
+        await stop_monitoring_service()
 
     return config
 
 
 @router.post("/enable")
 async def enable_monitoring(
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_admin)
 ):
     """
     Enable the monitoring service.
 
-    Admin only. Starts background health check tasks.
+    Admin only. Starts the periodic health check loop.
     """
+    # #1121: persist enabled=True FIRST so the choice survives restarts even
+    # if the service is already running.
+    config = _persist_monitoring_enabled(True)
+
     service = get_monitoring_service()
     if service.is_running:
+        service.config = config
         return {"status": "already_running", "message": "Monitoring service is already running"}
 
-    # Start in background to avoid blocking
-    background_tasks.add_task(start_monitoring_service)
+    # #1121: start inline (awaited), not via a background task. start() only
+    # creates the loop task, so it doesn't block — and doing it synchronously
+    # closes the enable→disable race where a backgrounded start would run after
+    # a racing disable and leave the loop up against persisted `enabled=False`.
+    await start_monitoring_service(config)
 
     return {"status": "starting", "message": "Monitoring service is starting"}
 
 
 @router.post("/disable")
 async def disable_monitoring(
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(require_admin)
 ):
     """
     Disable the monitoring service.
 
-    Admin only. Stops background health check tasks.
+    Admin only. Stops the periodic health check loop.
     """
+    # #1121: persist enabled=False FIRST so a disabled fleet stays disabled
+    # across restarts even if the service wasn't running this process.
+    _persist_monitoring_enabled(False)
+
     service = get_monitoring_service()
     if not service.is_running:
         return {"status": "already_stopped", "message": "Monitoring service is not running"}
 
-    # Stop in background
-    background_tasks.add_task(stop_monitoring_service)
+    # #1121: stop inline (awaited), mirroring enable — keeps the persisted flag
+    # and the runtime state reconciled before returning. stop() cancels a
+    # loop task that is normally parked in asyncio.sleep, so it returns promptly.
+    await stop_monitoring_service()
 
     return {"status": "stopping", "message": "Monitoring service is stopping"}
 

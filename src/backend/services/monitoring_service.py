@@ -882,8 +882,11 @@ class MonitoringService:
             except Exception as e:
                 print(f"Monitoring check cycle failed: {e}")
 
-            # Wait for next cycle
-            await asyncio.sleep(self.config.docker_check_interval)
+            # Wait for next cycle. #1121: clamp to >=1s as a belt-and-suspenders
+            # guard against a non-positive interval slipping past the
+            # MonitoringConfig validator (e.g. a directly-mutated config),
+            # which would otherwise spin the loop into a tight flood.
+            await asyncio.sleep(max(1, self.config.docker_check_interval))
 
     async def _run_check_cycle(self):
         """Run one cycle of health checks for every Trinity agent.

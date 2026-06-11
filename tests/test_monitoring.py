@@ -457,19 +457,20 @@ class TestMonitoringConfig:
         api_client.put("/api/monitoring/config", json=original_config)
 
     def test_update_config_validation(self, api_client: TrinityApiClient):
-        """Invalid config values are rejected."""
+        """Non-positive check intervals are rejected (#1121)."""
         response = api_client.get("/api/monitoring/config")
         assert_status(response, 200)
         config = response.json()
 
-        # Try to set negative interval
-        # Note: MonitoringConfig doesn't currently validate for positive values,
-        # so this will succeed. Consider adding Field(ge=1) validation if needed.
-        config["docker_check_interval"] = -10
-
-        response = api_client.put("/api/monitoring/config", json=config)
-        # Currently accepts without validation - API returns 200
-        assert response.status_code == 200
+        # #1121: a non-positive interval makes asyncio.sleep return
+        # immediately, turning the loop into a tight health-check flood.
+        # The MonitoringConfig validator now rejects it → 422.
+        for field in ("docker_check_interval", "network_check_interval", "business_check_interval"):
+            for bad_value in (-10, 0):
+                bad = config.copy()
+                bad[field] = bad_value
+                response = api_client.put("/api/monitoring/config", json=bad)
+                assert response.status_code == 422, f"{field}={bad_value} should be rejected"
 
 
 # ============================================================================

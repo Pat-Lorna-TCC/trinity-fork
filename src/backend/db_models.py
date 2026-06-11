@@ -938,13 +938,36 @@ class FleetHealthStatus(BaseModel):
 
 
 class MonitoringConfig(BaseModel):
-    """Monitoring service configuration."""
-    enabled: bool = True
+    """Monitoring service configuration.
+
+    #1121: ``enabled`` is the single source of truth for whether the
+    fleet-monitoring loop runs, and it defaults to **OFF**. The backend
+    lifespan reads the persisted ``monitoring_config`` on boot and only
+    starts the loop when this flag is set, so the choice survives
+    restarts (previously the loop was never wired to lifespan and died
+    on every restart). ``enable``/``disable`` endpoints persist this flag.
+    """
+    enabled: bool = False
 
     # Check intervals (seconds)
     docker_check_interval: int = 30
     network_check_interval: int = 30
     business_check_interval: int = 60
+
+    @field_validator(
+        "docker_check_interval",
+        "network_check_interval",
+        "business_check_interval",
+    )
+    @classmethod
+    def _intervals_must_be_positive(cls, v: int, info) -> int:
+        # #1121: a non-positive interval makes ``asyncio.sleep`` return
+        # immediately, turning the loop into a tight health-check flood.
+        # Reject at construction (request body → 422; persisted bad config
+        # → falls back to DEFAULT_CONFIG in the loader).
+        if v < 1:
+            raise ValueError(f"{info.field_name} must be >= 1 second")
+        return v
 
     # Timeouts
     http_timeout: float = 10.0
