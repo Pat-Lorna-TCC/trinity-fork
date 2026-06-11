@@ -241,7 +241,8 @@ class SystemAgentService:
             environment=env_vars,
             labels=labels,
             mem_limit=resources.get("memory", "8g"),
-            cpu_count=int(resources.get("cpu", "4")),
+            # #1126: nano_cpus (Linux CFS quota), NOT cpu_count (Windows-only → NanoCpus=0).
+            nano_cpus=int(resources.get("cpu", "4")) * 1_000_000_000,
             restart_policy={"Name": "unless-stopped"},  # Auto-restart on failure
             # Always apply AppArmor for additional sandboxing
             security_opt=['apparmor:docker-default'],

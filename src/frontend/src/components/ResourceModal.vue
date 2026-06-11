@@ -34,17 +34,25 @@
           </div>
         </div>
 
+        <!-- Load-error banner (#1126): the GET failed, so the selects below may
+             show stale defaults rather than the agent's real values. -->
+        <div v-if="resourceLimits.error" class="mt-4 p-3 bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800 rounded-lg">
+          <p class="text-sm text-status-danger-700 dark:text-status-danger-300">
+            Could not load current resource limits — showing defaults. {{ resourceLimits.error }}
+          </p>
+        </div>
+
         <!-- Resource Configuration Form -->
         <div class="mt-5 space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Memory</label>
             <select
-              :value="resourceLimits.memory"
+              :value="resourceLimits.memory ?? resourceLimits.current_memory"
               @change="$emit('update:memory', $event.target.value || null)"
               :disabled="loading"
               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:ring-action-primary-500 focus:border-action-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
             >
-              <option :value="null">Default ({{ resourceLimits.current_memory || '4g' }})</option>
+              <option value="">Inherit default ({{ resourceLimits.current_memory || '4g' }})</option>
               <option value="1g">1 GB</option>
               <option value="2g">2 GB</option>
               <option value="4g">4 GB</option>
@@ -57,12 +65,12 @@
           <div>
             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">CPU Cores</label>
             <select
-              :value="resourceLimits.cpu"
+              :value="resourceLimits.cpu ?? resourceLimits.current_cpu"
               @change="$emit('update:cpu', $event.target.value || null)"
               :disabled="loading"
               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:ring-action-primary-500 focus:border-action-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
             >
-              <option :value="null">Default ({{ resourceLimits.current_cpu || '2' }})</option>
+              <option value="">Inherit default ({{ resourceLimits.current_cpu || '2' }})</option>
               <option value="1">1 Core</option>
               <option value="2">2 Cores</option>
               <option value="4">4 Cores</option>

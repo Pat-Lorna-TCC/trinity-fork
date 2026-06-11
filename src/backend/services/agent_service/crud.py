@@ -729,7 +729,10 @@ async def create_agent_internal(
                 tmpfs={'/tmp': 'noexec,nosuid,size=100m'},
                 network='trinity-agent-network',
                 mem_limit=config.resources.get('memory') or _get_default_resource('memory'),
-                cpu_count=int(config.resources.get('cpu') or _get_default_resource('cpu'))
+                # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
+                # is Windows-only in docker-py and left NanoCpus=0, so newly
+                # created agents never got a CPU limit on Linux.
+                nano_cpus=int(config.resources.get('cpu') or _get_default_resource('cpu')) * 1_000_000_000,
             )
 
             agent_status = get_agent_status_from_container(container)

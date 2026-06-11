@@ -251,6 +251,8 @@
               class="font-mono w-10 text-right"
               :class="agentStats.cpu_percent > 80 ? 'text-status-danger-500' : agentStats.cpu_percent > 50 ? 'text-status-warning-500' : 'text-status-success-500'"
             >{{ agentStats.cpu_percent }}%</span>
+            <!-- #1126: configured core ceiling, so live % reads against capacity -->
+            <span class="text-gray-400 dark:text-gray-500 font-mono">/ {{ resourceLimits.current_cpu || '2' }} cores</span>
           </div>
           <!-- Memory -->
           <div class="flex items-center space-x-1.5">
@@ -266,6 +268,8 @@
               class="font-mono w-14 text-right"
               :class="agentStats.memory_percent > 80 ? 'text-status-danger-500' : agentStats.memory_percent > 50 ? 'text-status-warning-500' : 'text-status-success-500'"
             >{{ formatBytes(agentStats.memory_used_bytes) }}</span>
+            <!-- #1126: configured max memory, so live usage reads against the ceiling -->
+            <span class="text-gray-400 dark:text-gray-500 font-mono">/ {{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
           </div>
           <!-- Uptime -->
           <div class="text-gray-500 dark:text-gray-400 font-mono w-16 text-right">

@@ -19,7 +19,8 @@ export function useAgentSettings(agentRef, agentsStore, showNotification) {
     cpu: null,
     current_memory: '4g',
     current_cpu: '2',
-    restart_needed: false
+    restart_needed: false,
+    error: null
   })
   const resourceLimitsLoading = ref(false)
 
@@ -84,15 +85,24 @@ export function useAgentSettings(agentRef, agentsStore, showNotification) {
         cpu: result.cpu,
         current_memory: result.current_memory || '4g',
         current_cpu: result.current_cpu || '2',
-        restart_needed: false
+        restart_needed: false,
+        error: null
       }
     } catch (err) {
+      // #1126: surface the failure instead of silently leaving stale defaults.
+      // The ResourceModal renders resourceLimits.error as a banner.
       console.error('Failed to load resource limits:', err)
+      resourceLimits.value = {
+        ...resourceLimits.value,
+        error: err?.response?.data?.detail || err?.message || 'Request failed',
+      }
     }
   }
 
+  // #1126: returns true on success / false on failure so the caller can avoid
+  // restarting the agent after a save that didn't persist.
   const updateResourceLimits = async () => {
-    if (resourceLimitsLoading.value) return
+    if (resourceLimitsLoading.value) return false
     resourceLimitsLoading.value = true
     try {
       const result = await agentsStore.setResourceLimits(
@@ -102,8 +112,10 @@ export function useAgentSettings(agentRef, agentsStore, showNotification) {
       )
       resourceLimits.value.restart_needed = result.restart_needed
       showNotification(result.message, 'success')
+      return true
     } catch (err) {
       showNotification(err.message || 'Failed to update resource limits', 'error')
+      return false
     } finally {
       resourceLimitsLoading.value = false
     }

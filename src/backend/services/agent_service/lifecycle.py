@@ -539,7 +539,10 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         tmpfs={'/tmp': 'noexec,nosuid,size=100m'},
         network='trinity-agent-network',
         mem_limit=memory,
-        cpu_count=int(cpu)
+        # #1126: nano_cpus (Linux CFS quota → HostConfig.NanoCpus), NOT
+        # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
+        # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
+        nano_cpus=int(cpu) * 1_000_000_000,
     )
 
     logger.info(f"Recreated container for agent {agent_name} with updated configuration")

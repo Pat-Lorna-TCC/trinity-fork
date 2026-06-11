@@ -562,24 +562,68 @@ const {
 } = useAgentSettings(agent, agentsStore, showNotification)
 
 // Save resource limits and restart agent if needed
+// #1126: poll the agent's real status until it reaches one of `targets`, or
+// timeout. Returns true if reached. Tolerates transient fetch errors mid-stop.
+async function waitForAgentStatus(targets, timeoutMs = 30000, intervalMs = 1000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const a = await agentsStore.fetchAgent(agent.value.name)
+      if (a) {
+        agent.value = a
+        if (targets.includes(a.status)) return true
+      }
+    } catch (_) {
+      // transient (container mid-teardown) — keep polling
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+  return false
+}
+
 async function saveResourceLimits() {
-  // Check if values actually changed
+  // Check if values actually changed. Compare against the effective (current_*)
+  // values; an empty override means "inherit", which equals current.
   const newMemory = resourceLimits.value.memory || resourceLimits.value.current_memory
   const newCpu = resourceLimits.value.cpu || resourceLimits.value.current_cpu
   const oldMemory = resourceLimits.value.current_memory
   const oldCpu = resourceLimits.value.current_cpu
   const valuesChanged = newMemory !== oldMemory || newCpu !== oldCpu
 
-  await updateResourceLimits()
+  // #1126: don't restart if the save didn't actually persist.
+  const saved = await updateResourceLimits()
+  if (!saved) return  // composable already surfaced the error
   showResourceModal.value = false
 
-  // If values changed and agent is running, restart it
+  // If values changed and agent is running, restart it to apply the new limits.
   if (valuesChanged && agent.value?.status === 'running') {
     showNotification('Restarting agent to apply new resource limits...', 'info')
-    await stopAgent()
-    // Wait a moment for container to fully stop
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    await startAgent()
+    try {
+      await stopAgent()
+      // #1126: gate the start on the container actually being stopped rather
+      // than a fixed 1s sleep (insufficient under load → "sometimes works").
+      const stopped = await waitForAgentStatus(['stopped', 'exited', 'created'])
+      if (!stopped) {
+        showNotification(
+          'Agent did not stop within 30s — not restarting automatically. Start it manually to apply the new limits.',
+          'error',
+        )
+        return
+      }
+      await startAgent()
+      // Refresh effective values so the header/dialog reflect the applied limits.
+      await loadAgent()
+      await loadResourceLimits()
+      showNotification('Agent restarted with new resource limits.', 'success')
+    } catch (err) {
+      showNotification(
+        `Restart failed: ${err?.message || err}. The agent may be stopped — start it manually.`,
+        'error',
+      )
+    }
+  } else {
+    // No restart needed — still refresh the effective values shown in the UI.
+    await loadResourceLimits()
   }
 }
 
