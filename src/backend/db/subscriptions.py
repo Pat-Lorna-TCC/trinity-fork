@@ -92,14 +92,25 @@ class SubscriptionOperations:
 
     @staticmethod
     def _agent_count_subquery():
-        """Correlated agent-count subquery: live (non-deleted) agents per subscription."""
+        """Correlated agent-count subquery: live (non-deleted) agents per subscription.
+
+        ``agent_ownership`` is aliased (#1199) so the subquery's FROM table is
+        always distinct from any ``agent_ownership`` in the enclosing query.
+        Without the alias, callers that *also* join ``agent_ownership`` in their
+        outer FROM (``get_agent_subscription``) make SQLAlchemy auto-correlate
+        ``agent_ownership`` out of the subquery, leaving it with no FROM clause —
+        a compile-time ``InvalidRequestError``. With the alias, auto-correlation
+        only removes ``subscription_credentials`` (the intended correlation), so
+        the helper is safe in every caller.
+        """
+        ao = agent_ownership.alias("ao_count")
         return (
             select(func.count())
-            .select_from(agent_ownership)
+            .select_from(ao)
             .where(
                 and_(
-                    agent_ownership.c.subscription_id == subscription_credentials.c.id,
-                    agent_ownership.c.deleted_at.is_(None),
+                    ao.c.subscription_id == subscription_credentials.c.id,
+                    ao.c.deleted_at.is_(None),
                 )
             )
             .scalar_subquery()
