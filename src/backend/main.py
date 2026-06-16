@@ -302,7 +302,10 @@ def setup_opentelemetry(app: FastAPI) -> bool:
         return True
     except Exception as e:
         # Log but don't fail startup — tracing is optional
-        print(f"OpenTelemetry initialization failed: {e}")
+        # print (not logger): setup_opentelemetry() runs at module-import time,
+        # before lifespan calls setup_logging(); flush=True guarantees delivery.
+        # Same rationale as the register_enterprise prints. (#858)
+        print(f"OpenTelemetry initialization failed: {e}", flush=True)
         return False
 
 
@@ -311,6 +314,23 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Set up structured JSON logging (captured by Vector)
     setup_logging()
+
+    # Emit the first-time setup token as early as possible (SEC #177) — before any
+    # other startup step that could hang and suppress it. Only someone with access to
+    # server logs can read this token and complete setup, preventing installation
+    # hijack by unauthenticated remote attackers. Use logger.warning (not print): the
+    # logging StreamHandler flushes after every record, whereas print() is
+    # block-buffered to the Docker pipe without PYTHONUNBUFFERED=1 and the token is
+    # silently lost from `docker logs` (#858).
+    from database import db as _db
+    if _db.get_setting_value('setup_completed', 'false') != 'true':
+        _setup_token = get_setup_setup_token()
+        logger.warning(
+            "TRINITY FIRST-TIME SETUP REQUIRED\n"
+            f"Setup token: {_setup_token}\n"
+            "Visit the Trinity UI and enter this token to set the admin password.\n"
+            "This token is only valid for this session."
+        )
 
     # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
     # Must start before the WebSocket endpoints begin accepting clients so the
@@ -337,85 +357,72 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("OpenTelemetry tracing disabled (set OTEL_ENABLED=1 to enable)")
 
-    # Print setup token if first-time setup is not yet complete (SEC #177).
-    # Only someone with access to server logs can read this token and complete setup,
-    # preventing installation hijack by unauthenticated remote attackers.
-    from database import db as _db
-    if _db.get_setting_value('setup_completed', 'false') != 'true':
-        _setup_token = get_setup_setup_token()
-        print("=" * 60)
-        print("TRINITY FIRST-TIME SETUP REQUIRED")
-        print("=" * 60)
-        print(f"Setup token: {_setup_token}")
-        print("Visit the Trinity UI and enter this token to set the admin password.")
-        print("This token is only valid for this session.")
-        print("=" * 60)
 
     if docker_client:
         try:
             agents = list_all_agents_fast()  # Fast startup - no slow Docker API calls
-            print(f"Found {len(agents)} existing Trinity agent containers")
+            logger.info(f"Found {len(agents)} existing Trinity agent containers")
             for agent in agents:
-                print(f"  - Agent: {agent.name} (status: {agent.status}, ssh_port: {agent.port})")
+                logger.info(f"  - Agent: {agent.name} (status: {agent.status}, ssh_port: {agent.port})")
         except Exception as e:
-            print(f"Error checking agents: {e}")
+            logger.error(f"Error checking agents: {e}")
 
         # Auto-deploy system agent (Phase 11.1)
         try:
             result = await system_agent_service.ensure_deployed()
-            print(f"System agent: {result['action']} - {result['message']}")
+            logger.info(f"System agent: {result['action']} - {result['message']}")
             if result.get('status') == 'error':
-                print(f"  Warning: System agent deployment issue - {result.get('message')}")
+                logger.warning(f"  Warning: System agent deployment issue - {result.get('message')}")
         except Exception as e:
-            print(f"Error deploying system agent: {e}")
+            logger.error(f"Error deploying system agent: {e}")
             # Don't fail startup - system agent is important but not critical for platform operation
     else:
-        print("Docker not available - running in demo mode")
+        logger.info("Docker not available - running in demo mode")
 
     # NOTE: Embedded scheduler REMOVED (2026-02-11)
     # All schedule execution is handled by the dedicated scheduler service (trinity-scheduler container)
     # which uses Redis distributed locking and syncs schedules from database periodically.
     # Manual triggers are also delegated to the dedicated scheduler.
     # See: src/scheduler/, docs/memory/feature-flows/scheduler-service.md
-    print("Using dedicated scheduler service (trinity-scheduler)")
+    logger.info("Using dedicated scheduler service (trinity-scheduler)")
 
     # Initialize log archive service
     try:
         log_archive_service.start()
-        print("Log archive service started")
+        logger.info("Log archive service started")
     except Exception as e:
-        print(f"Error starting log archive service: {e}")
+        logger.error(f"Error starting log archive service: {e}")
 
     # Initialize audit retention service (#552)
     try:
         audit_retention_service.start()
-        print("Audit retention service started")
+        logger.info("Audit retention service started")
     except Exception as e:
-        print(f"Error starting audit retention service: {e}")
+        logger.error(f"Error starting audit retention service: {e}")
 
     # Initialize DB VACUUM service (#772)
     try:
         db_vacuum_service.start()
-        print("DB vacuum service started")
+        logger.info("DB vacuum service started")
     except Exception as e:
-        print(f"Error starting DB vacuum service: {e}")
+        logger.error(f"Error starting DB vacuum service: {e}")
 
     # PERF-269: Stagger background services to reduce SQLite write contention
     # Start operator queue sync service (OPS-001) — polls every 5s
     try:
         operator_queue_service.start()
-        print("Operator queue sync service started")
+        logger.info("Operator queue sync service started")
     except Exception as e:
-        print(f"Error starting operator queue sync service: {e}")
+        logger.error(f"Error starting operator queue sync service: {e}")
 
     # Stagger cleanup service start by 2.5s to offset from operator queue writes
     async def _start_cleanup_delayed():
         await asyncio.sleep(2.5)
         try:
             cleanup_service.start()
-            print("Cleanup service started (staggered +2.5s)")
+            logger.info("Cleanup service started (staggered +2.5s)")
         except Exception as e:
-            print(f"Error starting cleanup service: {e}")
+            logger.error(f"Error starting cleanup service: {e}")
     asyncio.create_task(_start_cleanup_delayed())
 
     # SESSION_TAB_2026-04 Phase 4.2: periodic JSONL reaper for the Session
@@ -426,9 +433,9 @@ async def lifespan(app: FastAPI):
         try:
             from services.session_cleanup_service import get_session_cleanup_service
             get_session_cleanup_service().start()
-            print("Session cleanup service started (staggered +7.5s)")
+            logger.info("Session cleanup service started (staggered +7.5s)")
         except Exception as e:
-            print(f"Error starting session cleanup service: {e}")
+            logger.error(f"Error starting session cleanup service: {e}")
     asyncio.create_task(_start_session_cleanup_delayed())
 
     # Issue #389: Sync health service — 60s poll cadence, staggered +5s.
@@ -436,9 +443,9 @@ async def lifespan(app: FastAPI):
         await asyncio.sleep(5)
         try:
             sync_health_service.start()
-            print("Sync health service started (staggered +5s)")
+            logger.info("Sync health service started (staggered +5s)")
         except Exception as e:
-            print(f"Error starting sync health service: {e}")
+            logger.error(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
 
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
@@ -447,7 +454,7 @@ async def lifespan(app: FastAPI):
     try:
         canary_service.start()
     except Exception as e:
-        print(f"Error starting canary service: {e}")
+        logger.error(f"Error starting canary service: {e}")
 
     # BACKLOG-001 / CAPACITY-CONSOLIDATE (#428): instantiate the unified
     # CapacityManager (this also wires the slot-release → backlog-drain
@@ -471,9 +478,9 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(60)
 
         asyncio.create_task(_capacity_maintenance_loop())
-        print("CapacityManager initialised; maintenance loop running (60s)")
+        logger.info("CapacityManager initialised; maintenance loop running (60s)")
     except Exception as e:
-        print(f"Error wiring CapacityManager: {e}")
+        logger.error(f"Error wiring CapacityManager: {e}")
 
     # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
     # staggered +10s. Actively downgrades an agent to a soft `degraded` health
@@ -486,9 +493,9 @@ async def lifespan(app: FastAPI):
         try:
             from services.heartbeat_service import schedule_heartbeat_watch
             schedule_heartbeat_watch()
-            print("Heartbeat watch loop started (staggered +10s, 5s cadence)")
+            logger.info("Heartbeat watch loop started (staggered +10s, 5s cadence)")
         except Exception as e:
-            print(f"Error starting heartbeat watch loop: {e}")
+            logger.error(f"Error starting heartbeat watch loop: {e}")
     asyncio.create_task(_start_heartbeat_watch_delayed())
 
     # MON-001 / #1121: resume the authoritative 30s fleet-monitoring loop from
@@ -507,11 +514,11 @@ async def lifespan(app: FastAPI):
             config = load_persisted_monitoring_config()
             if config.enabled:
                 await start_monitoring_service(config)
-                print("Monitoring service resumed from persisted config (enabled)")
+                logger.info("Monitoring service resumed from persisted config (enabled)")
             else:
-                print("Monitoring service not started (persisted setting disabled / default off)")
+                logger.info("Monitoring service not started (persisted setting disabled / default off)")
         except Exception as e:
-            print(f"Error resuming monitoring service: {e}")
+            logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
 
     # Recover orphaned regular task executions (Issue #128).
@@ -524,16 +531,16 @@ async def lifespan(app: FastAPI):
     try:
         task_recovery = await recover_orphaned_executions()
         if task_recovery["recovered"] > 0:
-            print(
+            logger.info(
                 f"Task execution recovery: "
                 f"recovered={task_recovery['recovered']}, "
                 f"still_running={task_recovery['still_running']}, "
                 f"skipped_grace={task_recovery.get('skipped_grace', 0)}"
             )
         else:
-            print("Task execution recovery: no orphaned executions found")
+            logger.info("Task execution recovery: no orphaned executions found")
     except Exception as e:
-        print(f"Error recovering task executions: {e}")
+        logger.error(f"Error recovering task executions: {e}")
         # Don't fail startup - recovery is important but not critical
     finally:
         mark_startup_recovery_complete()
@@ -555,7 +562,7 @@ async def lifespan(app: FastAPI):
                 _slack_transport = SlackSocketTransport(app_token, _slack_adapter, message_router)
                 await _slack_transport.start()
                 if _slack_transport.is_connected:
-                    print("Slack transport started (Socket Mode)")
+                    logger.info("Slack transport started (Socket Mode)")
                 else:
                     # #708: keep the transport reference — its startup recovery
                     # supervisor (slack_socket.py:_startup_supervisor) is now
@@ -563,9 +570,9 @@ async def lifespan(app: FastAPI):
                     # when the network recovers. Setting _slack_transport=None
                     # here would orphan the supervisor and leave Slack offline
                     # until the next manual restart.
-                    print("Slack Socket Mode: initial connection failed; recovery supervisor retrying in background.")
+                    logger.warning("Slack Socket Mode: initial connection failed; recovery supervisor retrying in background.")
             else:
-                print("Slack Socket Mode: no app token configured (set slack_app_token in Settings)")
+                logger.info("Slack Socket Mode: no app token configured (set slack_app_token in Settings)")
         else:
             signing_secret = get_slack_signing_secret()
             if signing_secret:
@@ -574,14 +581,14 @@ async def lifespan(app: FastAPI):
                 _slack_transport = SlackWebhookTransport(signing_secret, _slack_adapter, message_router)
                 await _slack_transport.start()
                 set_webhook_transport(_slack_transport)
-                print(f"Slack transport started (webhook mode)")
+                logger.info("Slack transport started (webhook mode)")
             else:
-                print("Slack webhook mode: no signing secret configured")
+                logger.info("Slack webhook mode: no signing secret configured")
 
         # Store transport for shutdown
         app.state.slack_transport = _slack_transport
     except Exception as e:
-        print(f"Error starting Slack transport: {e}")
+        logger.error(f"Error starting Slack transport: {e}")
         # Don't fail startup — Slack is optional
 
     # Start Telegram webhook transport
@@ -605,15 +612,15 @@ async def lifespan(app: FastAPI):
                 try:
                     await register_webhook(binding["agent_name"], public_url)
                 except Exception as we:
-                    print(f"Telegram webhook reconciliation failed for {binding['agent_name']}: {we}")
+                    logger.warning(f"Telegram webhook reconciliation failed for {binding['agent_name']}: {we}")
             if bindings:
-                print(f"Telegram transport ready ({len(bindings)} bot(s) registered)")
+                logger.info(f"Telegram transport ready ({len(bindings)} bot(s) registered)")
             else:
-                print("Telegram transport ready (no bots configured)")
+                logger.info("Telegram transport ready (no bots configured)")
         else:
-            print("Telegram transport ready (no public URL — webhooks not registered)")
+            logger.info("Telegram transport ready (no public URL — webhooks not registered)")
     except Exception as e:
-        print(f"Error starting Telegram transport: {e}")
+        logger.error(f"Error starting Telegram transport: {e}")
         # Don't fail startup — Telegram is optional
 
     # Start WhatsApp (Twilio) webhook transport (WHATSAPP-001)
@@ -638,11 +645,11 @@ async def lifespan(app: FastAPI):
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
             bindings = db.get_all_whatsapp_bindings()
-            print(f"WhatsApp transport ready ({len(bindings)} binding(s); webhook URLs refreshed)")
+            logger.info(f"WhatsApp transport ready ({len(bindings)} binding(s); webhook URLs refreshed)")
         else:
-            print("WhatsApp transport ready (no public URL — webhook URLs not computed)")
+            logger.info("WhatsApp transport ready (no public URL — webhook URLs not computed)")
     except Exception as e:
-        print(f"Error starting WhatsApp transport: {e}")
+        logger.error(f"Error starting WhatsApp transport: {e}")
         # Don't fail startup — WhatsApp is optional
 
     yield
@@ -653,38 +660,38 @@ async def lifespan(app: FastAPI):
     # Shutdown log archive service
     try:
         log_archive_service.stop()
-        print("Log archive service stopped")
+        logger.info("Log archive service stopped")
     except Exception as e:
-        print(f"Error stopping log archive service: {e}")
+        logger.error(f"Error stopping log archive service: {e}")
 
     # Shutdown audit retention service (#552)
     try:
         audit_retention_service.stop()
-        print("Audit retention service stopped")
+        logger.info("Audit retention service stopped")
     except Exception as e:
-        print(f"Error stopping audit retention service: {e}")
+        logger.error(f"Error stopping audit retention service: {e}")
 
     # Shutdown DB vacuum service (#772)
     try:
         db_vacuum_service.stop()
-        print("DB vacuum service stopped")
+        logger.info("DB vacuum service stopped")
     except Exception as e:
-        print(f"Error stopping DB vacuum service: {e}")
+        logger.error(f"Error stopping DB vacuum service: {e}")
 
     # Shutdown cleanup service
     try:
         cleanup_service.stop()
-        print("Cleanup service stopped")
+        logger.info("Cleanup service stopped")
     except Exception as e:
-        print(f"Error stopping cleanup service: {e}")
+        logger.error(f"Error stopping cleanup service: {e}")
 
     # Shutdown session cleanup service (Phase 4.2)
     try:
         from services.session_cleanup_service import get_session_cleanup_service
         get_session_cleanup_service().stop()
-        print("Session cleanup service stopped")
+        logger.info("Session cleanup service stopped")
     except Exception as e:
-        print(f"Error stopping session cleanup service: {e}")
+        logger.error(f"Error stopping session cleanup service: {e}")
 
     # Shutdown fleet monitoring loop (MON-001 / #1121) — parity with the
     # other lifespan-managed loops; no-op when it was never started.
@@ -692,66 +699,66 @@ async def lifespan(app: FastAPI):
         from services.monitoring_service import get_monitoring_service, stop_monitoring_service
         if get_monitoring_service().is_running:
             await stop_monitoring_service()
-            print("Monitoring service stopped")
+            logger.info("Monitoring service stopped")
     except Exception as e:
-        print(f"Error stopping monitoring service: {e}")
+        logger.error(f"Error stopping monitoring service: {e}")
 
     # Shutdown Slack transport
     try:
         slack_transport = getattr(app.state, 'slack_transport', None)
         if slack_transport:
             await slack_transport.stop()
-            print("Slack transport stopped")
+            logger.info("Slack transport stopped")
     except Exception as e:
-        print(f"Error stopping Slack transport: {e}")
+        logger.error(f"Error stopping Slack transport: {e}")
 
     # Shutdown Telegram transport
     try:
         telegram_transport = getattr(app.state, 'telegram_transport', None)
         if telegram_transport:
             await telegram_transport.stop()
-            print("Telegram transport stopped")
+            logger.info("Telegram transport stopped")
     except Exception as e:
-        print(f"Error stopping Telegram transport: {e}")
+        logger.error(f"Error stopping Telegram transport: {e}")
 
     # Shutdown WhatsApp transport
     try:
         whatsapp_transport = getattr(app.state, 'whatsapp_transport', None)
         if whatsapp_transport:
             await whatsapp_transport.stop()
-            print("WhatsApp transport stopped")
+            logger.info("WhatsApp transport stopped")
     except Exception as e:
-        print(f"Error stopping WhatsApp transport: {e}")
+        logger.error(f"Error stopping WhatsApp transport: {e}")
 
 
     # Shutdown sync health service (#389)
     try:
         sync_health_service.stop()
-        print("Sync health service stopped")
+        logger.info("Sync health service stopped")
     except Exception as e:
-        print(f"Error stopping sync health service: {e}")
+        logger.error(f"Error stopping sync health service: {e}")
 
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
         canary_service.stop()
-        print("Canary service stopped")
+        logger.info("Canary service stopped")
     except Exception as e:
-        print(f"Error stopping canary service: {e}")
+        logger.error(f"Error stopping canary service: {e}")
 
     # Shutdown operator queue sync service
     try:
         operator_queue_service.stop()
-        print("Operator queue sync service stopped")
+        logger.info("Operator queue sync service stopped")
     except Exception as e:
-        print(f"Error stopping operator queue sync service: {e}")
+        logger.error(f"Error stopping operator queue sync service: {e}")
 
     # Close pooled HTTP clients (RELIABILITY-001)
     try:
         from services.agent_client import close_all_clients
         await close_all_clients()
-        print("Agent HTTP client pool closed")
+        logger.info("Agent HTTP client pool closed")
     except Exception as e:
-        print(f"Error closing agent HTTP client pool: {e}")
+        logger.error(f"Error closing agent HTTP client pool: {e}")
 
     try:
         await platform_audit_service.log(
@@ -760,7 +767,7 @@ async def lifespan(app: FastAPI):
             source="system",
         )
     except Exception as e:
-        print(f"Error writing shutdown audit entry: {e}")
+        logger.error(f"Error writing shutdown audit entry: {e}")
 
     # Drain event bus + stop dispatcher last so late-lifecycle broadcasts
     # (e.g. "agent_stopped" emitted during service shutdown) still land on
@@ -768,9 +775,9 @@ async def lifespan(app: FastAPI):
     try:
         await stream_dispatcher.stop()
         await event_bus.stop(drain_timeout=2.0)
-        print("Event bus and stream dispatcher stopped")
+        logger.info("Event bus and stream dispatcher stopped")
     except Exception as e:
-        print(f"Error stopping event bus/dispatcher: {e}")
+        logger.error(f"Error stopping event bus/dispatcher: {e}")
 
 
 # Create FastAPI app

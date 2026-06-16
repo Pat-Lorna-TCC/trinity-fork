@@ -188,18 +188,28 @@ def get_setup_token() -> str:
     return _setup_token
 ```
 
-**Startup Token Printing** (in `main.py` lifespan handler):
+**Startup Token Emission** (in `main.py` lifespan handler, immediately after
+`setup_logging()`):
 ```python
 if _db.get_setting_value('setup_completed', 'false') != 'true':
     _setup_token = get_setup_setup_token()
-    print("=" * 60)
-    print("TRINITY FIRST-TIME SETUP REQUIRED")
-    print("=" * 60)
-    print(f"Setup token: {_setup_token}")
-    print("Visit the Trinity UI and enter this token to set the admin password.")
-    print("This token is only valid for this session.")
-    print("=" * 60)
+    logger.warning(
+        "TRINITY FIRST-TIME SETUP REQUIRED\n"
+        f"Setup token: {_setup_token}\n"
+        "Visit the Trinity UI and enter this token to set the admin password.\n"
+        "This token is only valid for this session."
+    )
 ```
+
+> **Why `logger.warning`, not `print` (#858):** the lifespan runs under uvicorn with
+> stdout connected to a Docker log pipe (not a TTY). Without `ENV PYTHONUNBUFFERED=1`
+> in `docker/backend/Dockerfile`, CPython block-buffers `print()` (~8KB) and the token
+> never reaches `docker logs` — deadlocking fresh installs. The logging `StreamHandler`
+> flushes after every record, so the token is delivered regardless, and it now flows
+> through the structured JSON logger / Vector. The token is emitted *before* the
+> event-bus and audit-write startup so a hang there can't suppress it. `PYTHONUNBUFFERED=1`
+> (parity with `docker/scheduler/Dockerfile`) is the belt-and-suspenders fix for every
+> remaining `print()`.
 
 **Request Model**:
 ```python
@@ -715,7 +725,12 @@ env_vars = {
    ```bash
    docker compose logs backend | grep "Setup token"
    ```
-   - **Expected**: `Setup token: <32-character token>`
+   - **Expected**: a structured JSON log line whose `message` contains
+     `Setup token: <token>` (emitted at `WARNING` level since #858).
+   - **Prod caveat**: production runs uvicorn with `--workers 2`, and the token is
+     per-process — each worker logs a *different* token. Until the multi-worker token
+     is unified (#1165), copy a token and retry if `POST /api/setup/admin-password`
+     returns 403 (your request may have hit the other worker).
 
 3. **Visit any page** (e.g., `http://localhost/`)
    - **Expected**: Redirect to `/setup`

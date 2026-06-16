@@ -44,7 +44,20 @@ _STUBBED_MODULE_NAMES = [
 
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
-    saved = {n: sys.modules.get(n) for n in _STUBBED_MODULE_NAMES}
+    names = _STUBBED_MODULE_NAMES + ["db.connection"]
+    saved = {n: sys.modules.get(n) for n in names}
+    # Re-imports inside the fixtures also rebind the parent `db` package
+    # attributes (`import db.X` sets `db.X` on the package). Later test files
+    # that bind via `import db.X as Y` resolve through the package attribute,
+    # not sys.modules — if only sys.modules is restored, they get a different
+    # module object than `from db.X import ...` and attribute patches land on
+    # the wrong module (the test_agent_soft_delete DB_PATH mismatch).
+    db_pkg = sys.modules.get("db")
+    saved_attrs = (
+        {n.split(".", 1)[1]: getattr(db_pkg, n.split(".", 1)[1], None) for n in names}
+        if db_pkg is not None
+        else {}
+    )
     for name in _STUBBED_MODULE_NAMES:
         sys.modules.pop(name, None)
     try:
@@ -55,6 +68,12 @@ def _restore_sys_modules():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+        for attr, value in saved_attrs.items():
+            if value is None:
+                if hasattr(db_pkg, attr):
+                    delattr(db_pkg, attr)
+            else:
+                setattr(db_pkg, attr, value)
 
 
 def _make_db_schema(conn: sqlite3.Connection) -> None:

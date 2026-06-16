@@ -653,6 +653,18 @@
         "executions"
       ],
       "description": "Fleet executions list/stats (EXEC-022): _narrow_to_agent access gate, status/trigger/search/hours SQL filters, windowed stats; plus the #1150 trigger-filter allowlist drift guard (ExecutionsPanel dropdown subset of _VALID_TRIGGERS)."
+    },
+    {
+      "file": "unit/test_858_dockerfile_unbuffered.py",
+      "feature": "#858",
+      "added": "2026-06-11",
+      "categories": [
+        "backend",
+        "unit",
+        "docker",
+        "setup"
+      ],
+      "description": "First-time setup token delivery (#858), both layers: Dockerfile parity guard (backend declares ENV PYTHONUNBUFFERED=1 matching scheduler, parsed as a real ENV instruction) + AST checks on main.py lifespan (token emitted via logger.warning after setup_logging() and before event_bus.start(); no print() calls anywhere in the lifespan)."
     }
   ]
 }
