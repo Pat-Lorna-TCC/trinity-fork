@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DOCKERFILE = REPO_ROOT / "docker" / "backend" / "Dockerfile"
 SCHEDULER_DOCKERFILE = REPO_ROOT / "docker" / "scheduler" / "Dockerfile"
 BACKEND_MAIN = REPO_ROOT / "src" / "backend" / "main.py"
+BACKEND_SETUP = REPO_ROOT / "src" / "backend" / "routers" / "setup.py"
 
 # Matches a real Docker `ENV PYTHONUNBUFFERED=1` instruction (line-leading `ENV`,
 # `KEY=VALUE` form), not a commented-out line or prose mentioning the variable.
@@ -132,25 +133,30 @@ def _is_method_call(call: ast.Call, obj: str, method: str) -> bool:
 @pytest.mark.unit
 def test_lifespan_emits_setup_token_via_logger_before_event_bus() -> None:
     """The token must go through logger.warning, after setup_logging() and
-    before event_bus.start() — a hang in later startup must not suppress it."""
+    before event_bus.start() — a hang in later startup must not suppress it.
+
+    Since #1165 the emission is one frame deeper: lifespan calls
+    ``_ensure_setup_token()`` (which logs the token via ``logger.warning`` inside
+    ``routers/setup.py``) instead of building the warning inline. The #858
+    invariant is unchanged — this checks the *ordering* of the triggering call
+    here, and ``test_ensure_setup_token_logs_token_via_logger_warning`` checks
+    the emission still flows through the flushing logger.
+    """
     body = _lifespan_body()
 
     logging_idx = _first_statement_index(
         body, lambda c: _is_name_call(c, "setup_logging")
     )
     token_idx = _first_statement_index(
-        body,
-        lambda c: _is_method_call(c, "logger", "warning")
-        and "Setup token:" in _string_content(c),
+        body, lambda c: _is_name_call(c, "_ensure_setup_token")
     )
     event_bus_idx = _first_statement_index(
         body, lambda c: _is_method_call(c, "event_bus", "start")
     )
 
     assert token_idx is not None, (
-        "lifespan no longer emits the first-time setup token via "
-        "logger.warning('... Setup token: ...') — fresh installs would have no "
-        "way to read the token from `docker logs` (#858)."
+        "lifespan no longer calls _ensure_setup_token() — fresh installs would "
+        "have no way to read the setup token from `docker logs` (#858, #1165)."
     )
     assert logging_idx is not None and logging_idx < token_idx, (
         "the setup-token emission must come after setup_logging() so the "
@@ -160,6 +166,33 @@ def test_lifespan_emits_setup_token_via_logger_before_event_bus() -> None:
         "the setup-token emission must come before event_bus.start() so a hang "
         "in event-bus/audit startup cannot suppress it (#858)."
     )
+
+
+@pytest.mark.unit
+def test_ensure_setup_token_logs_token_via_logger_warning() -> None:
+    """ensure_setup_token() must emit the token through logger.warning, not
+    print() — the #858 flush guarantee now lives in routers/setup.py (#1165)."""
+    tree = ast.parse(BACKEND_SETUP.read_text(encoding="utf-8"))
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "ensure_setup_token"),
+        None,
+    )
+    assert fn is not None, "ensure_setup_token() not found in routers/setup.py"
+
+    logs_token = any(
+        isinstance(node, ast.Call)
+        and _is_method_call(node, "logger", "warning")
+        and "Setup token:" in _string_content(node)
+        for node in ast.walk(fn)
+    )
+    assert logs_token, (
+        "ensure_setup_token() must log '... Setup token: ...' via logger.warning "
+        "(flushing path) so the token reaches `docker logs` (#858, #1165)."
+    )
+    prints = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and _is_name_call(n, "print")]
+    assert not prints, "ensure_setup_token() must not use print() (#858)."
 
 
 @pytest.mark.unit

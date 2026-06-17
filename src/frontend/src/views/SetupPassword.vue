@@ -14,8 +14,29 @@
         </p>
       </div>
 
+      <!-- Waiting for Redis: setup can't proceed until the backend reaches Redis (#1165) -->
+      <div v-if="!setupAvailable" class="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6 text-center">
+        <svg class="animate-spin h-8 w-8 mx-auto text-action-primary-600 dark:text-action-primary-400" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <h2 class="mt-4 text-lg font-medium text-gray-900 dark:text-white">Waiting for backend services</h2>
+        <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+          The backend can't reach Redis yet, so first-time setup isn't available. This page continues automatically once Redis is back.
+        </p>
+        <!-- Surface the 503 detail here too: flipping to this panel hides the form's error block (#1165) -->
+        <p v-if="error" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
+        <button
+          type="button"
+          @click="checkAvailability"
+          class="mt-4 inline-flex justify-center py-2 px-4 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500"
+        >
+          Retry now
+        </button>
+      </div>
+
       <!-- Setup Form -->
-      <div class="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6">
+      <div v-else class="bg-white dark:bg-gray-800 shadow-lg rounded-lg p-6">
         <form @submit.prevent="handleSubmit" class="space-y-4">
           <!-- Setup Token Field -->
           <div>
@@ -182,7 +203,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { clearSetupCache } from '../router'
@@ -196,6 +217,38 @@ const showPassword = ref(false)
 const showConfirmPassword = ref(false)
 const loading = ref(false)
 const error = ref(null)
+
+// #1165: setup needs Redis (the shared cross-worker token lives there). When
+// Redis is down, show a "waiting for Redis" panel instead of the form and poll
+// until it recovers, rather than presenting a form that would 503.
+const setupAvailable = ref(true)
+let pollTimer = null
+
+async function checkAvailability() {
+  try {
+    const { data } = await axios.get('/api/setup/status')
+    // Backward-compatible: older backends omit setup_available → treat as available.
+    setupAvailable.value = data.setup_available !== false
+    // Clear any stale "Redis unavailable" error once setup is reachable again.
+    if (setupAvailable.value && error.value) error.value = null
+  } catch (e) {
+    // Status probe failed (network/backend) — show the form anyway; the POST
+    // will surface a clear error if setup genuinely can't proceed.
+    setupAvailable.value = true
+  }
+}
+
+onMounted(() => {
+  checkAvailability()
+  // Poll only while unavailable so the form appears automatically once Redis recovers.
+  pollTimer = setInterval(() => {
+    if (!setupAvailable.value) checkAvailability()
+  }, 4000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
 
 const passwordsMatch = computed(() => {
   return password.value === confirmPassword.value
@@ -276,6 +329,10 @@ async function handleSubmit() {
         error.value = 'Setup has already been completed.'
         setTimeout(() => router.push('/login'), 2000)
       }
+    } else if (e.response?.status === 503) {
+      // Backend can't reach Redis (#1165) — flip to the waiting panel; polling resumes.
+      error.value = e.response?.data?.detail || 'Setup is temporarily unavailable. Retrying…'
+      setupAvailable.value = false
     } else {
       error.value = e.response?.data?.detail || 'Failed to set password. Please try again.'
     }

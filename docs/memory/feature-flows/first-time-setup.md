@@ -176,29 +176,44 @@ from routers.setup import router as setup_router
 app.include_router(setup_router)
 ```
 
-**Setup Token** (module-level, generated at startup):
+**Setup Token** (shared across workers via Redis, #1165):
 ```python
-# Single-use setup token generated at startup.
-# Must be provided when calling POST /api/setup/admin-password.
-# Prevents installation hijack: only someone with access to server logs can complete setup.
-_setup_token: str = secrets.token_urlsafe(24)
+# Each worker has a candidate; the first to boot wins the SETNX claim and all
+# workers read the single winner. Validation reads it live, so a token issued on
+# one worker validates on any worker (prod runs uvicorn --workers 2).
+_SETUP_TOKEN_KEY = "trinity:setup:token"
+_candidate_token: str = secrets.token_urlsafe(24)
 
-def get_setup_token() -> str:
-    """Return the setup token for printing during startup."""
-    return _setup_token
+def ensure_setup_token():
+    """Idempotently ensure a shared token exists in Redis; return it (or None if
+    Redis is unreachable). The issuing worker prints it to the logs exactly once."""
+    r = _get_redis()
+    if r is None:
+        return None  # setup blocked until Redis recovers — never a per-worker fallback
+    issued = r.set(_SETUP_TOKEN_KEY, _candidate_token, nx=True)  # first-writer-wins
+    token = r.get(_SETUP_TOKEN_KEY)
+    if issued:
+        logger.warning("TRINITY FIRST-TIME SETUP REQUIRED\nSetup token: %s\n...", token)
+    return token
 ```
+
+> **Why Redis, not a module global (#1165):** prod runs `uvicorn --workers 2`.
+> A per-process `secrets.token_urlsafe(24)` differs per worker, so the operator
+> copies one worker's token but `POST /api/setup/admin-password` load-balances
+> and 403s ~50% of the time on the other worker. The shared Redis token (read
+> live at validation time) removes the per-worker drift entirely. When Redis is
+> unreachable, setup is **blocked** (`setup_available: false` + 503), not
+> silently degraded to a per-worker token.
 
 **Startup Token Emission** (in `main.py` lifespan handler, immediately after
 `setup_logging()`):
 ```python
 if _db.get_setting_value('setup_completed', 'false') != 'true':
-    _setup_token = get_setup_setup_token()
-    logger.warning(
-        "TRINITY FIRST-TIME SETUP REQUIRED\n"
-        f"Setup token: {_setup_token}\n"
-        "Visit the Trinity UI and enter this token to set the admin password.\n"
-        "This token is only valid for this session."
-    )
+    # ensure_setup_token() claims the shared token and prints it (once, on the
+    # issuing worker). If Redis is down, the next GET /api/setup/status reissues
+    # once it recovers — no restart needed.
+    if _ensure_setup_token() is None:
+        logger.error("FIRST-TIME SETUP REQUIRED but Redis unreachable — setup blocked.")
 ```
 
 > **Why `logger.warning`, not `print` (#858):** the lifespan runs under uvicorn with
@@ -229,11 +244,15 @@ async def get_setup_status():
 
     Returns:
         - setup_completed: Whether the admin password has been set
-        - dev_mode_hint: Hint for dev mode (if applicable)
+        - setup_available: False while pending if Redis (token store) is down (#1165)
     """
     setup_completed = db.get_setting_value('setup_completed', 'false') == 'true'
+    setup_available = True
+    if not setup_completed:
+        setup_available = ensure_setup_token() is not None  # probes Redis + self-heals
     return {
-        "setup_completed": setup_completed
+        "setup_completed": setup_completed,
+        "setup_available": setup_available,
     }
 ```
 
@@ -249,8 +268,14 @@ async def set_admin_password(data: SetAdminPasswordRequest, request: Request):
     if db.get_setting_value('setup_completed', 'false') == 'true':
         raise HTTPException(status_code=403, detail="Setup already completed...")
 
-    # 2. Validate setup token (constant-time compare to guard against timing attacks)
-    if not secrets.compare_digest(data.setup_token, _setup_token):
+    # 2. Resolve the shared token; 503 if Redis is unreachable (don't fall back
+    #    to a per-worker token — that is the #1165 bug).
+    shared_token = ensure_setup_token()
+    if shared_token is None:
+        raise HTTPException(status_code=503, detail="Setup temporarily unavailable: Redis unreachable.")
+
+    # 3. Validate setup token (constant-time compare to guard against timing attacks)
+    if not secrets.compare_digest(data.setup_token, shared_token):
         raise HTTPException(
             status_code=403,
             detail="Invalid setup token. Check server logs for the setup token printed at startup."
@@ -668,6 +693,7 @@ env_vars = {
 |------------|-------------|---------|----------|
 | Setup already completed | 403 | "Setup already completed" | Frontend redirects to /login after 2s |
 | Invalid setup token | 403 | "Invalid setup token. Check server logs..." | Frontend shows error, stays on form |
+| Redis unreachable (#1165) | 503 | "Setup temporarily unavailable: ... cannot reach Redis" | Frontend shows "waiting for Redis" panel + polls |
 | Missing setup_token field | 422 | Pydantic validation error | Form prevents submission |
 | Password too short | 400 | "Password must be at least 8 characters" | Form validation |
 | Passwords don't match | 400 | "Passwords do not match" | Form validation |
@@ -695,7 +721,7 @@ env_vars = {
 
 3. **Setup Endpoint Protection** (SEC #177):
    - No network auth required (must work on fresh install)
-   - **Single-use setup token**: Generated at startup via `secrets.token_urlsafe(24)`, printed ONLY to server logs. An attacker without local server access cannot complete setup.
+   - **Shared setup token (#1165)**: Generated via `secrets.token_urlsafe(24)`, stored in Redis (first-writer-wins) so all uvicorn workers share one value, printed ONLY to server logs. An attacker without local server access cannot complete setup. When Redis is down, setup is blocked (503) rather than degraded to a per-worker token.
    - Constant-time token comparison (`secrets.compare_digest`) prevents timing attacks
    - Self-disabling after first use via `setup_completed` flag
    - Audit logged even on blocked attempts
@@ -727,10 +753,11 @@ env_vars = {
    ```
    - **Expected**: a structured JSON log line whose `message` contains
      `Setup token: <token>` (emitted at `WARNING` level since #858).
-   - **Prod caveat**: production runs uvicorn with `--workers 2`, and the token is
-     per-process — each worker logs a *different* token. Until the multi-worker token
-     is unified (#1165), copy a token and retry if `POST /api/setup/admin-password`
-     returns 403 (your request may have hit the other worker).
+   - **Prod (#1165)**: production runs uvicorn with `--workers 2`, but the token is
+     shared via Redis (first-writer-wins), so exactly **one** worker logs the token
+     and it validates regardless of which worker handles the request. If Redis is
+     down, no token is logged and the setup UI shows "waiting for Redis"; the token
+     is issued automatically once Redis recovers (no restart needed).
 
 3. **Visit any page** (e.g., `http://localhost/`)
    - **Expected**: Redirect to `/setup`

@@ -68,7 +68,7 @@ from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
 from routers.public import router as public_router
 from routers.files import router as files_router  # FILES-001 — outbound file downloads
-from routers.setup import router as setup_router, get_setup_token as get_setup_setup_token
+from routers.setup import router as setup_router, ensure_setup_token as _ensure_setup_token
 from routers.telemetry import router as telemetry_router
 from routers.logs import router as logs_router
 from routers.agent_dashboard import router as agent_dashboard_router
@@ -324,13 +324,16 @@ async def lifespan(app: FastAPI):
     # silently lost from `docker logs` (#858).
     from database import db as _db
     if _db.get_setting_value('setup_completed', 'false') != 'true':
-        _setup_token = get_setup_setup_token()
-        logger.warning(
-            "TRINITY FIRST-TIME SETUP REQUIRED\n"
-            f"Setup token: {_setup_token}\n"
-            "Visit the Trinity UI and enter this token to set the admin password.\n"
-            "This token is only valid for this session."
-        )
+        # ensure_setup_token() claims the shared cross-worker token and prints it
+        # to the logs itself (exactly once, on the issuing worker — #1165). When
+        # Redis is unreachable no token is issued and setup is blocked; the next
+        # GET /api/setup/status reissues+prints once Redis recovers, so no
+        # restart is needed. logger (not print) keeps the #858 flush guarantee.
+        if _ensure_setup_token() is None:
+            logger.error(
+                "TRINITY FIRST-TIME SETUP REQUIRED but Redis is unreachable — no "
+                "setup token issued yet. Setup is blocked until Redis is reachable."
+            )
 
     # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
     # Must start before the WebSocket endpoints begin accepting clients so the
