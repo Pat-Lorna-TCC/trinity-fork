@@ -16,6 +16,71 @@
         <p class="mt-4 text-gray-600 dark:text-gray-400">{{ loadingMessage }}</p>
       </div>
 
+      <!-- Two-Factor step (#5) — shown after the first factor when 2FA is required -->
+      <div v-else-if="authStore.mfaChallenge" class="mt-8 space-y-6 bg-white dark:bg-gray-800 rounded-lg shadow-lg dark:shadow-gray-900 p-8">
+        <!-- Recovery codes shown once after forced enrollment -->
+        <div v-if="mfaRecoveryCodes.length" class="space-y-4">
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Save your recovery codes</h3>
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            Store these somewhere safe — each works once if you lose your authenticator. They won't be shown again.
+          </p>
+          <div class="grid grid-cols-2 gap-1 font-mono text-sm text-gray-800 dark:text-gray-200 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+            <code v-for="c in mfaRecoveryCodes" :key="c" class="select-all">{{ c }}</code>
+          </div>
+          <button @click="finishMfa"
+            class="w-full py-3 px-4 rounded-lg text-white bg-blue-600 hover:bg-blue-700">Continue</button>
+        </div>
+
+        <!-- Forced enrollment: scan QR + confirm -->
+        <div v-else-if="mfaMode === 'enroll'" class="space-y-4">
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Set up two-factor authentication</h3>
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            Your account requires 2FA. Scan this QR with an authenticator app, then enter the 6-digit code.
+          </p>
+          <template v-if="mfaEnroll">
+            <QrCode :value="mfaEnroll.otpauth_uri" />
+            <div class="text-xs text-gray-500 dark:text-gray-400">
+              Can't scan? Enter this key manually:
+              <code class="block mt-1 select-all font-mono text-sm text-gray-800 dark:text-gray-200 break-all">{{ mfaEnroll.secret }}</code>
+            </div>
+          </template>
+          <p v-else class="text-sm text-gray-500 dark:text-gray-400">Preparing enrollment…</p>
+
+          <form @submit.prevent="handleMfaEnrollConfirm" class="space-y-3">
+            <input v-model="mfaCode" type="text" inputmode="numeric" maxlength="6" placeholder="000000"
+              autocomplete="one-time-code"
+              class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-center text-2xl tracking-widest" />
+            <button type="submit" :disabled="loginLoading || mfaCode.length < 6 || !mfaEnroll"
+              class="w-full py-3 px-4 rounded-lg text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+              {{ loginLoading ? 'Verifying…' : 'Confirm & Sign In' }}
+            </button>
+          </form>
+        </div>
+
+        <!-- Verify (already enrolled) -->
+        <div v-else class="space-y-4">
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Two-factor authentication</h3>
+          <p class="text-sm text-gray-600 dark:text-gray-400">
+            Enter the 6-digit code from your authenticator app, or a recovery code.
+          </p>
+          <form @submit.prevent="handleMfaVerify" class="space-y-3">
+            <input v-model="mfaCode" type="text" inputmode="text" autocomplete="one-time-code"
+              placeholder="000000"
+              class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-center text-2xl tracking-widest" />
+            <button type="submit" :disabled="loginLoading || !mfaCode"
+              class="w-full py-3 px-4 rounded-lg text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+              {{ loginLoading ? 'Verifying…' : 'Verify & Sign In' }}
+            </button>
+          </form>
+        </div>
+
+        <p v-if="authError" class="text-sm text-red-600 dark:text-red-400 text-center">{{ authError }}</p>
+        <button v-if="!mfaRecoveryCodes.length" @click="handleMfaCancel"
+          class="w-full text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200">
+          ← Cancel
+        </button>
+      </div>
+
       <!-- Error State -->
       <div v-else-if="authError" class="bg-white dark:bg-gray-800 rounded-lg shadow-lg dark:shadow-gray-900 p-8">
         <div class="text-center">
@@ -175,9 +240,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import QrCode from '../components/QrCode.vue'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -196,6 +262,23 @@ const countdownInterval = ref(null)
 
 // UI state for switching between login methods
 const showAdminLogin = ref(false)
+
+// Two-factor step state (#5)
+const mfaCode = ref('')
+const mfaEnroll = ref(null)            // provisioning payload during forced enrollment
+const mfaRecoveryCodes = ref([])
+const mfaMode = computed(() =>
+  authStore.mfaChallenge?.enrollmentRequired ? 'enroll' : 'verify'
+)
+
+// When a forced-enrollment challenge appears, fetch the provisioning QR.
+watch(() => authStore.mfaChallenge, async (ch) => {
+  mfaCode.value = ''
+  mfaEnroll.value = null
+  if (ch && ch.enrollmentRequired) {
+    mfaEnroll.value = await authStore.startMfaEnrollment()
+  }
+}, { immediate: true })
 
 // Computed
 const isLoading = computed(() => {
@@ -301,6 +384,42 @@ const handleAdminLogin = async () => {
   }
 
   loginLoading.value = false
+}
+
+// --- Two-factor handlers (#5) ---
+const handleMfaVerify = async () => {
+  loginLoading.value = true
+  authStore.clearError()
+  const ok = await authStore.verifyMfaCode(mfaCode.value.trim())
+  loginLoading.value = false
+  if (ok) router.push('/')
+}
+
+const handleMfaEnrollConfirm = async () => {
+  loginLoading.value = true
+  authStore.clearError()
+  const { ok, recoveryCodes } = await authStore.confirmMfaEnrollment(mfaCode.value.trim())
+  loginLoading.value = false
+  if (ok) {
+    // Already authenticated (token minted); show the codes, then continue.
+    mfaRecoveryCodes.value = recoveryCodes || []
+    if (!mfaRecoveryCodes.value.length) router.push('/')
+  }
+}
+
+const finishMfa = () => {
+  mfaRecoveryCodes.value = []
+  router.push('/')
+}
+
+const handleMfaCancel = () => {
+  authStore.cancelMfa()
+  authStore.clearError()
+  mfaCode.value = ''
+  mfaEnroll.value = null
+  mfaRecoveryCodes.value = []
+  password.value = ''
+  handleBackToEmail()
 }
 
 // Handle retry after error

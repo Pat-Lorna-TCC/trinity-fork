@@ -289,6 +289,26 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     # Update last login timestamp
     db.update_last_login(user["username"])
 
+    # #5 — enterprise 2FA gate. Password is the first factor; if a second
+    # factor is required (user enrolled OR policy mandates it for the role)
+    # return a challenge instead of an access token. OSS-only builds have no
+    # provider registered → returns None → unchanged behaviour.
+    from services import mfa_gate
+    challenge = mfa_gate.gate_login(user, mode="admin")
+    if challenge:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHENTICATION,
+            event_action="mfa_challenge_issued",
+            source="api",
+            actor_ip=client_ip,
+            target_type="user",
+            target_id=user["username"],
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"method": "admin"},
+        )
+        return challenge
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user["username"]},
@@ -505,6 +525,25 @@ async def verify_email_login_code(request: Request):
 
     # Update last login
     db.update_last_login(user["username"])
+
+    # #5 — enterprise 2FA gate. The verified email code is the first factor;
+    # if a second factor is required, return a challenge instead of a token.
+    # OSS-only builds have no provider → returns None → unchanged behaviour.
+    from services import mfa_gate
+    challenge = mfa_gate.gate_login(user, mode="email")
+    if challenge:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHENTICATION,
+            event_action="mfa_challenge_issued",
+            source="api",
+            actor_ip=client_ip,
+            target_type="user",
+            target_id=user["username"],
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"method": "email", "email": email},
+        )
+        return challenge
 
     # Create JWT token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

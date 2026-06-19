@@ -65,9 +65,20 @@ class User(BaseModel):
 
 
 class Token(BaseModel):
-    """JWT token response."""
-    access_token: str
-    token_type: str
+    """JWT token response.
+
+    Normally carries ``access_token``. When enterprise 2FA (#5) requires a
+    second factor, the login endpoint instead returns ``mfa_required`` +
+    ``challenge_token`` and no ``access_token`` — the client completes the
+    flow at ``/api/enterprise/2fa/login/*`` to obtain the real token. The 2FA
+    fields are always absent in OSS-only builds.
+    """
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
+    mfa_required: Optional[bool] = None
+    mfa_enrolled: Optional[bool] = None
+    enrollment_required: Optional[bool] = None
+    challenge_token: Optional[str] = None
 
 
 class ChatMessageRequest(BaseModel):

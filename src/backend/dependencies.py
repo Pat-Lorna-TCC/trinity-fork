@@ -65,6 +65,47 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
     return encoded_jwt
 
 
+# Scope marker for the short-lived token issued between password/email
+# verification and second-factor completion (enterprise 2FA, #5). A token
+# carrying this scope is NOT a valid access token — it only authorizes the
+# /api/enterprise/2fa/login/* endpoints.
+MFA_CHALLENGE_SCOPE = "mfa_challenge"
+MFA_CHALLENGE_EXPIRE_MINUTES = 5
+
+
+def create_mfa_challenge_token(username: str, mode: str = "prod") -> str:
+    """Mint a short-lived challenge token binding a half-authenticated session
+    to its eventual login ``mode``. Generic (OSS) — the enterprise module
+    decides *whether* to require it; this only encodes it. The carried ``mode``
+    is replayed into the final access token so admin/email tokens keep their
+    original mode after the second factor."""
+    return create_access_token(
+        data={"sub": username, "scope": MFA_CHALLENGE_SCOPE},
+        expires_delta=timedelta(minutes=MFA_CHALLENGE_EXPIRE_MINUTES),
+        mode=mode,
+    )
+
+
+def decode_mfa_challenge(token: str) -> Optional[dict]:
+    """Validate a challenge token. Returns ``{"username", "mode"}`` if the
+    token is a non-expired challenge token for an existing, non-suspended
+    user; ``None`` otherwise. Used by the enterprise 2FA login endpoints to
+    resolve the half-authenticated identity before minting the real token."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != MFA_CHALLENGE_SCOPE:
+        return None
+    username = payload.get("sub")
+    if not username:
+        return None
+    user = db.get_user_by_username(username)
+    if not user or user.get("suspended_at"):
+        return None
+    return {"username": username, "mode": payload.get("mode", "prod")}
+
+
 def decode_token(token: str) -> Optional[dict]:
     """
     Decode a JWT token without FastAPI dependency.
@@ -80,6 +121,10 @@ def decode_token(token: str) -> Optional[dict]:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if not username:
+            return None
+
+        # #5 — a half-authenticated 2FA challenge token is not a session token.
+        if payload.get("scope") == MFA_CHALLENGE_SCOPE:
             return None
 
         # Get full user record from database
@@ -115,6 +160,12 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
+            raise credentials_exception
+
+        # #5 — reject a 2FA challenge token used as a session token. It only
+        # authorizes /api/enterprise/2fa/login/*; the second factor must be
+        # completed there to obtain a real access token.
+        if payload.get("scope") == MFA_CHALLENGE_SCOPE:
             raise credentials_exception
 
         user = db.get_user_by_username(username)

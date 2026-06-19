@@ -71,6 +71,7 @@ RUN pip install --no-cache-dir \
     opentelemetry-instrumentation-httpx==0.50b0 \
     opentelemetry-instrumentation-redis==0.50b0 \
     python-magic==0.4.27 \
+    pyotp==2.9.0 \
     twilio==9.10.5 \
     "audioop-lts; python_version >= '3.13'"
 

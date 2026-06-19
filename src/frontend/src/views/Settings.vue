@@ -42,6 +42,9 @@
           <!-- MCP Keys Tab Content (extracted to component, #302) -->
           <McpKeysTab v-if="activeTab === 'mcp-keys'" />
 
+          <!-- #5 — Security / Two-Factor (enterprise, gated by `2fa`) -->
+          <TwoFactorPanel v-if="activeTab === 'security'" />
+
           <!-- Platform Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -1907,12 +1910,17 @@ import { useSettingsStore } from '../stores/settings'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const settingsStore = useSettingsStore()
+// Declared early: visibleTabs (and thus the activeTab initializer below) reads
+// it during setup to gate the enterprise-only Security tab (#5). Declaring it
+// later would hit the temporal dead zone and blank the whole Settings page.
+const enterpriseStore = useEnterpriseStore()
 
 // #926: cached fetch of /api/version (singleton shared with NavBar).
 const buildInfo = useBuildInfo()
@@ -1933,11 +1941,17 @@ const ALL_TABS = [
   { id: 'access',       label: 'Access',       adminOnly: true  },
   { id: 'integrations', label: 'Integrations', adminOnly: true  },
   { id: 'mcp-keys',     label: 'MCP Keys',     adminOnly: false },
+  { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
 ]
 const { isAdmin } = useRole()
 const visibleTabs = computed(() =>
-  ALL_TABS.filter(t => isAdmin.value || !t.adminOnly)
+  ALL_TABS.filter(t => {
+    // #5 — the Security (2FA) tab only appears when the enterprise `2fa`
+    // feature is entitled; otherwise it's hidden in OSS-only builds.
+    if (t.requires) return enterpriseStore.isEntitled(t.requires)
+    return isAdmin.value || !t.adminOnly
+  })
 )
 const validTabIds = computed(() => visibleTabs.value.map(t => t.id))
 const DEFAULT_TAB = computed(() =>
@@ -1975,7 +1989,7 @@ const usersList = ref([])
 const loadingUsers = ref(false)
 
 // #995 — enterprise per-user activity audit (gated by user_management).
-const enterpriseStore = useEnterpriseStore()
+// (enterpriseStore is declared near the top — visibleTabs needs it during setup.)
 const umEntitled = computed(() => enterpriseStore.isEntitled('user_management'))
 const activityUser = ref(null)
 const activityData = ref(null)
