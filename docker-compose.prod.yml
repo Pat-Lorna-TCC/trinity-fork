@@ -182,9 +182,18 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      # #1230: relaxed so the probe tolerates transient load without hiding a
+      # real outage. With only 2 uvicorn workers, scheduled-batch windows make
+      # them GIL-contended; a /health probe then waits out the old 10s timeout,
+      # and 3 consecutive aborts flipped the container to `unhealthy` even
+      # though /health served 200s throughout (false negative). Any consumer of
+      # Docker health (autoheal, depends_on: service_healthy, LB drain) could
+      # act on that and restart the backend mid-batch, orphaning in-flight
+      # executions. Higher timeout + start_period + retries absorb the spike;
+      # a genuine outage (all probes fail) still trips after ~5 intervals.
+      timeout: 30s
+      retries: 5
+      start_period: 60s
 
   frontend:
     build:
