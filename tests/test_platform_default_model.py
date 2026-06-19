@@ -59,7 +59,7 @@ class TestGetPlatformDefaultModelUnit:
         sys.modules.pop("services.settings_service", None)
 
         import importlib
-        import src.backend.services.settings_service as svc_module
+        import services.settings_service as svc_module
         importlib.reload(svc_module)
 
         svc = svc_module.SettingsService()
@@ -81,7 +81,7 @@ class TestGetPlatformDefaultModelUnit:
         sys.modules.pop("services.settings_service", None)
 
         import importlib
-        import src.backend.services.settings_service as svc_module
+        import services.settings_service as svc_module
         importlib.reload(svc_module)
 
         svc = svc_module.SettingsService()
@@ -106,7 +106,7 @@ class TestGetPlatformDefaultModelUnit:
         sys.modules.pop("services.settings_service", None)
 
         import importlib
-        import src.backend.services.settings_service as svc_module
+        import services.settings_service as svc_module
         importlib.reload(svc_module)
 
         svc = svc_module.SettingsService()
