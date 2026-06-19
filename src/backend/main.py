@@ -610,7 +610,7 @@ async def lifespan(app: FastAPI):
         from services.settings_service import settings_service
         public_url = settings_service.get_setting("public_chat_url", "")
         if public_url:
-            bindings = db.get_all_telegram_bindings()
+            bindings = _db.get_all_telegram_bindings()
             for binding in bindings:
                 try:
                     await register_webhook(binding["agent_name"], public_url)
@@ -647,7 +647,7 @@ async def lifespan(app: FastAPI):
         public_url = _settings_svc.get_setting("public_chat_url", "")
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
-            bindings = db.get_all_whatsapp_bindings()
+            bindings = _db.get_all_whatsapp_bindings()
             logger.info(f"WhatsApp transport ready ({len(bindings)} binding(s); webhook URLs refreshed)")
         else:
             logger.info("WhatsApp transport ready (no public URL — webhook URLs not computed)")
