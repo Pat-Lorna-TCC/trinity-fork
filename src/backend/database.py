@@ -598,6 +598,12 @@ class DatabaseManager:
     def set_read_only_mode(self, agent_name: str, enabled: bool, config: dict = None):
         return self._agent_ops.set_read_only_mode(agent_name, enabled, config)
 
+    def get_full_capabilities(self, agent_name: str) -> bool:
+        return self._agent_ops.get_full_capabilities(agent_name)
+
+    def set_full_capabilities(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_full_capabilities(agent_name, enabled)
+
     # =========================================================================
     # Agent Guardrails (GUARD-001)
     # =========================================================================
