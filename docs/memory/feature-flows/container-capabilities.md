@@ -142,6 +142,8 @@ container = docker_client.containers.run(
 )
 ```
 
+The `tmpfs` mount is the shared `AGENT_TMPFS_MOUNT` constant from `capabilities.py` in **both** modes — full vs restricted differs only in `cap_add`/`security_opt`, not in the /tmp hardening. The agent's `TMPDIR` is also set to `AGENT_DEFAULT_TMPDIR` (`/home/developer/.tmp`) in the env block (`crud.py:522`). See [/tmp tmpfs size](#tmp-tmpfs-size-agent_tmp_size-1231-1098).
+
 ### Container Recreation on Start
 
 **File**: `src/backend/services/agent_service/lifecycle.py:150-162`
@@ -210,6 +212,27 @@ new_container = docker_client.containers.run(
     ...
 )
 ```
+
+The recreate path imports the same `AGENT_TMPFS_MOUNT` / `AGENT_DEFAULT_TMPDIR` constants (`lifecycle.py:98-99`) and sets `TMPDIR` via `env_vars.setdefault('TMPDIR', AGENT_DEFAULT_TMPDIR)` (`lifecycle.py:363`), so create and recreate can't drift. See [/tmp tmpfs size](#tmp-tmpfs-size-agent_tmp_size-1231-1098).
+
+## /tmp tmpfs Size (`AGENT_TMP_SIZE`, #1231 / #1098)
+
+Agent `/tmp` is a RAM-backed tmpfs, hardened `noexec,nosuid` so a compromised agent can't stage/execute payloads there. Only the **size** is configurable — the `noexec,nosuid` flags are a security boundary and stay hardcoded.
+
+**Single source of truth**: `src/backend/services/agent_service/capabilities.py:72-116`. The mount spec is built **once** as the module constant `AGENT_TMPFS_MOUNT` (`capabilities.py:107-109`) and imported by both the create path (`crud.py:39,791`) and the recreate path (`lifecycle.py:98,587`), so the two can't drift.
+
+| Aspect | Detail | Reference |
+|--------|--------|-----------|
+| Env var | `AGENT_TMP_SIZE` on the **backend** service (e.g. `512m`, `2g`) | `.env.example:329`, `docker-compose.yml:52`, `docker-compose.prod.yml:96` (`${AGENT_TMP_SIZE:-512m}`) |
+| Default | `_AGENT_TMP_SIZE_DEFAULT = "512m"` | `capabilities.py:92` |
+| Validation | `_AGENT_TMP_SIZE_RE = re.compile(r"^\d+[mg]$")` — `<int>m`/`<int>g` (case-insensitive); empty / bare number / Kubernetes-style suffix → falls back to default (never a broken or unbounded mount) | `capabilities.py:93,96-104` |
+| Resolution | `_resolve_agent_tmp_size()` reads the env var, lower-cases, returns it if it matches the regex else the default | `capabilities.py:96-104` |
+| Memory accounting | The size counts against the agent's memory cgroup — kept bounded by design | `capabilities.py:84-86` |
+| Apply semantics | Mount specs are creation-time, so a changed `AGENT_TMP_SIZE` is picked up on **recreate**, not on a plain restart | `capabilities.py:87-88` |
+
+### TMPDIR Scratch Redirect (#1098)
+
+`/tmp`'s `noexec` + size cap breaks heavy scratch (pip/npm installs, compiling C extensions, ML wheels like torch/transformers — "No space left on device" at the cap, "Permission denied" on `noexec`). The default `TMPDIR` is therefore set to `AGENT_DEFAULT_TMPDIR = '/home/developer/.tmp'` (`capabilities.py:116`) — the disk-backed, exec-capable agent home volume — which dodges both the size cap and `noexec` while keeping /tmp's hardened posture. `TMPDIR` is injected at container create (`crud.py:522`) and recreate (`lifecycle.py:363`); the directory itself is created writable by UID 1000 at container start by `docker/base-image/startup.sh`, so existing agents pick it up on restart. Tools that hardcode `/tmp` (e.g. the `gh` CLI) ignore `TMPDIR` and still exhaust the cap — the larger default `512m` (#1231) is the mitigation for those.
 
 ## Frontend Layer
 
