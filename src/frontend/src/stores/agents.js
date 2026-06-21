@@ -352,6 +352,30 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // #668 — agent compatibility report. STATIC checks recompute live; pass
+    // includeAi=true to force a fresh (cost-incurring) AI evaluation, otherwise
+    // the last persisted AI verdicts are returned. The Overview panel fetches
+    // STATIC-only first (instant), then AI.
+    async getCompatibility(name, { includeAi = false } = {}) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/compatibility`, {
+        params: { include_ai: includeAi },
+        headers: authStore.authHeader,
+      })
+      return response.data
+    },
+
+    // #668 — apply an auto-fix for a correctable (gitignore) check. Owner/admin.
+    async fixCompatibilityIssue(name, checkId) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/compatibility/fix`,
+        { check_id: checkId },
+        { headers: authStore.authHeader },
+      )
+      return response.data
+    },
+
     async getAgentModel(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/model`, {

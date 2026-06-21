@@ -625,7 +625,33 @@ All other checks require manual intervention.
 
 ## Implementation Notes
 
-- Checks in this spec map to the validation service at `src/backend/services/compatibility_service.py` (to be created per issue #668)
-- AI-evaluated checks call the Claude API with the relevant file contents; results include a confidence score and explanation
-- The full check list is versioned here; bump this file when adding/removing checks
-- Check IDs are stable — do not renumber existing checks; append new ones
+- Checks in this spec map to the validation service package at `src/backend/services/compatibility/` (`spec.py` is the single source of truth; `collector.py`, `static_checks.py`, `ai_checks.py`, `fixes.py`) — issue #668.
+- AI-evaluated checks call the Claude API (`claude-haiku-4-5`) with the relevant file contents, batched by category; results include a confidence score and explanation.
+- The full check list is versioned here; bump this file when adding/removing checks. A unit test (`tests/unit/test_compatibility_checks.py::TestSpecDocSync`) asserts the check-id set here matches `spec.py` exactly, so the two can't drift.
+- Check IDs are stable — do not renumber existing checks; append new ones.
+
+### Implementation deviations (#668)
+
+The shipped validator differs from the `Type` column above in a few principled,
+test-locked ways:
+
+- **AI severity is capped at SOFT.** An LLM verdict is non-deterministic, so an
+  AI check never drives the HARD count. The catalog keeps each check's declared
+  severity; the report downgrades any `AI` + `HARD` check (only **C-002**) to
+  SOFT at emit time. HARD remains reserved for deterministic STATIC checks.
+- **P-006 is implemented STATIC** (doc marks it AI). The check has literal
+  approval-gate patterns to scan and is HARD, so it must not depend on an
+  optional API key; it scans the command files referenced by `template.yaml`
+  schedules (the actual autonomous path).
+- **F-007, A-001, X-007 are implemented STATIC** (doc marks them AI or hybrid).
+  The determinable signal is a deterministic file/pattern check (system-package
+  references; schedule message starts with `/`; scheduled command exists).
+- **Runtime-aware.** Claude-specific checks (`CLAUDE.md` content, `.claude/`
+  skills/commands) are **omitted** for non-Claude runtimes (Codex/Gemini, #1187)
+  so those agents aren't flagged with false HARDs.
+- **Persistence (departs from the issue's "no DB table" note).** The latest
+  report per agent is persisted in `agent_compatibility_results` (one row,
+  upserted) so AI verdicts show on every Overview load without re-spending
+  tokens, and the fleet can aggregate "N agents have HARD findings". STATIC
+  checks recompute live on each read; persisted AI verdicts are merged in until
+  a re-run.

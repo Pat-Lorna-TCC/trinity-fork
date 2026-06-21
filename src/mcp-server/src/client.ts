@@ -23,6 +23,7 @@ import type {
   ActivityTimelineResponse,
   OperatorQueueItem,
   OperatorQueueListResponse,
+  CompatibilityReport,
 } from "./types.js";
 
 /**
@@ -255,6 +256,21 @@ export class TrinityClient {
     return this.request<AgentTemplateInfo>(
       "GET",
       `/api/agents/${encodeURIComponent(name)}/info`
+    );
+  }
+
+  /**
+   * Get the agent compatibility report (#668).
+   * STATIC checks recompute live; pass includeAi=true to force a fresh AI
+   * evaluation (otherwise the last persisted AI verdicts are returned).
+   */
+  async getAgentCompatibilityReport(
+    name: string,
+    includeAi: boolean = true
+  ): Promise<CompatibilityReport> {
+    return this.request<CompatibilityReport>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/compatibility?include_ai=${includeAi}`
     );
   }
 

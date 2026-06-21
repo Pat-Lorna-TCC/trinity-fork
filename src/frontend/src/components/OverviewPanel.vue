@@ -18,6 +18,7 @@ import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import StackedBarChart from './StackedBarChart.vue'
 import TrendLineChart from './TrendLineChart.vue'
+import CompatibilityPanel from './CompatibilityPanel.vue'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -305,6 +306,9 @@ onMounted(() => {
       </span>
       <span class="text-xs text-status-warning-700 dark:text-status-warning-400">View in Operations →</span>
     </router-link>
+
+    <!-- 2b. Deployment compatibility (#668) — count + expandable checklist, auto-fix -->
+    <CompatibilityPanel :agent="agent" />
 
     <!-- 3. Trend charts -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">

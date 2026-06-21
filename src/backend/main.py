@@ -75,6 +75,7 @@ from routers.logs import router as logs_router
 from routers.agent_dashboard import router as agent_dashboard_router
 from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.canary import router as canary_router  # CANARY-001 / Issue #411
+from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router
 from routers.tags import router as tags_router
@@ -908,6 +909,7 @@ app.include_router(logs_router)
 app.include_router(agent_dashboard_router)
 app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase 1)
 app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
+app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
 app.include_router(tags_router)  # Agent Tags (ORG-001)

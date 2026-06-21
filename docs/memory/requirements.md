@@ -3014,6 +3014,64 @@ eliminate the hook-vs-tar race), snapshot retention, and the rename/purge
 snapshot-dir cascade — all deferred to PR2. The pre-existing
 home/public/shared **volume leak-on-purge** + **strand-on-rename** is a separate
 fleet-wide bug filed independently.
+## 42. Agent Compatibility Validation (#668)
+
+### 42.1 Server-Side Compatibility Checks with Auto-Fix (#668)
+
+**Description**: Agents deployed to Trinity that don't follow Trinity
+best-practices (no playbooks, missing YAML, `.claude/` excluded from
+`.gitignore`, no `template.yaml`) fail silently at runtime in ways that are hard
+to diagnose. Trinity runs **server-side compatibility checks** against a running
+agent's workspace and surfaces actionable recommendations — **without blocking
+deployment**. Canonical check list: **`docs/agent-validation-spec.md`** (100
+checks, 11 categories), the single source of truth kept in lockstep with
+`services/compatibility/spec.py` by a sync test.
+
+- **FR-1 — Surface**: results render in the Agent Detail **Overview tab**
+  (`components/CompatibilityPanel.vue`, reusing the "needs attention" idiom —
+  count hidden when clean, expandable to the full grouped checklist) and via the
+  MCP tool `get_agent_compatibility_report`. Re-runnable on demand. Non-blocking.
+- **FR-2 — Severity**: each check is **HARD** (will likely break Trinity),
+  **SOFT** (best practice), or **INFO**, with `pass`/`fail`/`skipped` status.
+  HARD is reserved for deterministic STATIC checks; **AI-evaluated checks are
+  capped at SOFT** (an LLM verdict never drives the HARD count).
+- **FR-3 — Check types**: `[STATIC]` deterministic file/pattern analysis (run
+  always, free); `[AI]` LLM-evaluated quality judgments (Claude Haiku, batched by
+  category, persisted so they show on every load; `include_ai` forces a re-run).
+- **FR-4 — Collection**: ONE `docker exec` runs an in-container Python script
+  that emits a single JSON workspace snapshot (per-file binary/size/truncation
+  handling, secret-bearing files existence-only); pure check functions evaluate
+  the snapshot (unit-testable, no Docker). Stopped/unreadable container → a
+  degraded `unavailable` report (showing the last persisted result), never a 500.
+- **FR-5 — Auto-fix**: the 10 gitignore-related checks are auto-fixable via
+  `POST /api/agents/{name}/compatibility/fix` (owner/admin); the fix edits the
+  in-container `.gitignore` only (atomic write, per-agent Redis lock) and is
+  **uncommitted until the agent's next git sync** (no auto-commit).
+- **FR-6 — Runtime-aware**: Claude-specific checks (`CLAUDE.md`, `.claude/`
+  skills) are omitted for non-Claude runtimes (Codex/Gemini, #1187).
+- **FR-7 — Reuse/consolidate**: builds on the #950/#982 deploy-local logic
+  (`_is_platform_injected`, the `${VAR}`/`.env.example` parsing) for the
+  C-001/C-002 and K-001/K-002 overlaps, and on `git_service._GITIGNORE_PATTERNS`
+  + `_detect_git_dir` for the fixes.
+
+**API**: `GET /api/agents/{name}/compatibility?include_ai=` (read; STATIC live +
+persisted AI), `POST /api/agents/{name}/compatibility/fix` (owner/admin).
+**MCP**: `get_agent_compatibility_report(agent_name, include_ai?)`.
+
+**Persistence decision (departs from the issue's "no DB table" note).** The
+original issue specified transient results with no table. Implementation **adds
+`agent_compatibility_results`** (latest-snapshot-per-agent, dual-track SQLite +
+Alembic) because AI verdicts are **not** cheaply recomputable (they cost API
+calls): persistence lets AI findings show on every Overview load without
+re-spending tokens, unlocks fleet aggregation ("N agents have HARD findings"),
+and enables cheap post-fix re-checks. STATIC checks still recompute live each
+read; persisted AI verdicts merge in until a re-run. History/trend retention is a
+fast-follow (latest-only for now).
+
+**Out of scope (fast-follow)**: broken-agent **boot** triage (a stopped/failing
+container can't be exec'd — this validates *running* agents); AI-verdict trend
+history; the forward-looking template-level checks (#927 replica-safety, #1084
+side-effect profile).
 
 ---
 

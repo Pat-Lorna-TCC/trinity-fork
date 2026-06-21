@@ -145,6 +145,62 @@ export function createAgentTools(
     },
 
     // ========================================================================
+    // get_agent_compatibility_report - Trinity-compatibility validation (#668)
+    // ========================================================================
+    getAgentCompatibilityReport: {
+      name: "get_agent_compatibility_report",
+      description:
+        "Run Trinity-compatibility validation on an agent's workspace and return the report. " +
+        "Checks ~100 best-practice rules across file structure, security/secret hygiene, " +
+        "template.yaml, CLAUDE.md quality, credentials, git config, skills, autonomy, dashboard, " +
+        "cross-file consistency, and composability. Each result is HARD (will likely break Trinity), " +
+        "SOFT (best practice), or INFO, with PASS/FAIL/SKIPPED status. Deterministic STATIC checks " +
+        "run live; AI-evaluated checks read file contents (returns the last result unless include_ai=true). " +
+        "Non-blocking and advisory. Access control: agents can only report on agents they may call.",
+      parameters: z.object({
+        agent_name: z.string().describe("The name of the agent to validate"),
+        include_ai: z
+          .boolean()
+          .optional()
+          .describe("Force a fresh AI evaluation (default true); false returns the last persisted AI verdicts"),
+      }),
+      execute: async (
+        { agent_name, include_ai }: { agent_name: string; include_ai?: boolean },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        // Access control for agent-scoped keys (mirror get_agent_info).
+        if (authContext?.scope === "agent" && authContext?.agentName) {
+          const callerAgentName = authContext.agentName;
+          if (agent_name !== callerAgentName) {
+            const permittedAgents = await apiClient.getPermittedAgents(callerAgentName);
+            if (!permittedAgents.includes(agent_name)) {
+              return JSON.stringify({
+                success: false,
+                error: "Access denied",
+                reason: `Agent '${callerAgentName}' does not have permission to access '${agent_name}'`,
+              }, null, 2);
+            }
+          }
+        }
+
+        try {
+          const report = await apiClient.getAgentCompatibilityReport(
+            agent_name,
+            include_ai !== false
+          );
+          return JSON.stringify({ success: true, ...report }, null, 2);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error(`[get_agent_compatibility_report] Error: ${errorMessage}`);
+          return JSON.stringify({ success: false, error: errorMessage }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
     // create_agent - Create a new agent
     // ========================================================================
     createAgent: {

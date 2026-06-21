@@ -985,3 +985,19 @@ idempotency_keys = Table(
     Column("created_at", Text),
     Column("updated_at", Text),
 )
+
+# Agent compatibility results (#668) — latest snapshot per agent (upserted).
+agent_compatibility_results = Table(
+    "agent_compatibility_results",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("overall_status", Text),
+    Column("checks_json", Text),
+    Column("hard_count", Integer),
+    Column("soft_count", Integer),
+    Column("info_count", Integer),
+    Column("container_running", Integer),
+    Column("ai_ran_at", Text),
+    Column("static_ran_at", Text),
+    Column("updated_at", Text),
+)

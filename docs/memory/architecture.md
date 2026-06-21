@@ -92,6 +92,7 @@
 - `schedules.py` - Schedule CRUD and control
 - `executions.py` - Fleet execution list/stats (EXEC-022)
 - `analytics.py` - Agent-scoped Overview analytics (#1107)
+- `compatibility.py` - Agent compatibility validation: report + auto-fix (#668) — see [Agent Compatibility Validation](#agent-compatibility-validation-668)
 
 *Organization & Tags:*
 - `tags.py` - Agent tagging
@@ -170,6 +171,7 @@
 - `operator_queue_service.py` - Operating Room sync with agent containers (OPS-001)
 - `sync_health_service.py` - Git sync health polling — see [Git Sync Health](#git-sync-health-389390)
 - `canary_service.py` - Orchestration-invariant watcher — see [Canary Harness](#canary-invariant-harness-canary-001-411)
+- `compatibility/` - Agent compatibility validation package (spec/collector/static_checks/ai_checks/fixes) — see [Agent Compatibility Validation](#agent-compatibility-validation-668)
 
 *Auth & Credentials:*
 - `credential_encryption.py` - AES-256-GCM encryption for `.credentials.enc` and DB-persisted tokens (CRED-002, Invariant #12)
@@ -245,7 +247,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 
 | Module | Tools | Description |
 |--------|-------|-------------|
-| `agents.ts` (21) | `list_agents`, `get_agent`, `get_agent_info`, `create_agent`, `rename_agent`, `delete_agent`, `start_agent`, `stop_agent`, `list_templates`, `get_credential_status`, `inject_credentials`, `export_credentials`, `import_credentials`, `get_credential_encryption_key`, `get_agent_ssh_access`, `deploy_local_agent`, `initialize_github_sync`, `get_agent_github_pat_status`, `set_agent_github_pat`, `export_agent_data`, `import_agent_data` | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (#347), runtime-data export/import (#1169) |
+| `agents.ts` (22) | `list_agents`, `get_agent`, `get_agent_info`, `get_agent_compatibility_report`, `create_agent`, `rename_agent`, `delete_agent`, `start_agent`, `stop_agent`, `list_templates`, `get_credential_status`, `inject_credentials`, `export_credentials`, `import_credentials`, `get_credential_encryption_key`, `get_agent_ssh_access`, `deploy_local_agent`, `initialize_github_sync`, `get_agent_github_pat_status`, `set_agent_github_pat`, `export_agent_data`, `import_agent_data` | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (#347), runtime-data export/import (#1169), compatibility report (#668) |
 | `chat.ts` (3) | `chat_with_agent`, `get_chat_history`, `get_agent_logs` | Chat (enforces sharing rules), history, logs. Sync mode applies `MCP_CHAT_TIMEOUT_MS` (default 25000); on abort the client queries `/api/agents/{name}/executions`, matches the in-flight MCP row, and returns `{status:"queued_timeout", execution_id, message}` so callers poll instead of duplicate-queueing (#914) |
 | `schedules.ts` (8) | `list_agent_schedules`, `create_agent_schedule`, `get_agent_schedule`, `update_agent_schedule`, `delete_agent_schedule`, `toggle_agent_schedule`, `trigger_agent_schedule`, `get_schedule_executions` | Schedule CRUD and execution history |
 | `executions.ts` (3) | `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary` | Execution queries, async result polling, activity monitoring (MCP-007) |
@@ -488,6 +490,25 @@ Lookup keys: S-01/E-02/L-03 shipped via #653; S-02/E-01/E-05/B-01 (Phase 2) and 
 | L-03 | A | crit/major | Delete cascades: no live row in any cross-cutting table (sharing, schedules, non-terminal executions, skills, tags, shared files, public links, pending operator queue/access requests, agent-scoped MCP keys, active chat sessions) referencing an `agent_name` absent from `agent_ownership`; no orphan `agent:slots:{name}` (critical for orphaned executions/slots, major otherwise; #129 class) |
 | R-01 | A | critical | No zombie Claude processes: per running agent container, `ps -eo stat,comm` shows zero `^Z.*claude` (anchored `^Z` — procps-ng emits STAT left-aligned; guards PR #407). Docker-exec source; per-container failures land in `sources_unavailable` so one unhealthy container doesn't kill the cycle |
 
+### Agent Compatibility Validation (#668)
+
+Advisory, non-blocking server-side validation of a **running** agent's workspace
+against ~100 best-practice checks (11 categories) — surfaced in the Agent Detail
+Overview tab (`components/CompatibilityPanel.vue`, reusing the "needs attention"
+idiom), via `GET /api/agents/{name}/compatibility`, and the MCP tool
+`get_agent_compatibility_report`. The canonical check list is
+`docs/agent-validation-spec.md` (single source of truth, sync-tested against
+`spec.py`).
+
+Package `services/compatibility/` mirrors the deterministic `canary/` library:
+`spec.py` (catalog: id→severity/type/category/runtime/auto_fixable), `collector.py`,
+`static_checks.py`, `ai_checks.py`, `fixes.py`, `__init__.py` (`build_report`/`apply_fix`).
+
+- **Collector**: ONE `docker exec` runs an in-container `python3` script (base64-injected) that walks a FIXED path allowlist and emits ONE JSON snapshot — per-file `{exists,size,binary,truncated,content}` with 256 KB/file + 2 MB/total caps; secret-bearing files (`.env`, generated `.mcp.json`) are **existence-only** (content never leaves the container). Backend `json.loads` once → `unavailable` on any failure (never 500). Stopped container is detected via `docker_service` *before* exec → degraded report showing the last persisted result. Legacy `workspace/` dir via `git_service._detect_git_dir`.
+- **Checks**: pure `(snapshot)→[Check]` functions, unit-testable with fixtures. `[STATIC]` deterministic (run always, free); `[AI]` LLM-judged (Claude Haiku, batched by category, tool-use structured output, **iterate-expected** so an omitted check becomes `skipped` not vanished, fail-open on no-key/error). **AI severity is capped at SOFT** — HARD is reserved for STATIC. Claude-only checks (`CLAUDE.md`, `.claude/` skills) are skipped for non-Claude runtimes (#1187). Secret values are never echoed; AI payloads are redacted and exclude secret files.
+- **Persistence** (`agent_compatibility_results`, latest-snapshot-per-agent, upsert): STATIC recomputes live each read; persisted AI verdicts merge in so findings show on every Overview load without re-spending tokens (`?include_ai=true` / "Re-run" forces fresh AI). Departs from the issue's original "no DB table" note — see requirements §41. Cascade/rename via the `AGENT_REFS` registry.
+- **Auto-fix** (`POST .../compatibility/fix`, owner/admin): the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back; G-001 removes a blanket `.claude/` line by exact-line match (never substring). **No auto-commit** — uncommitted until the agent's next git sync. Creates no execution, so Invariant #18 doesn't apply.
+
 ---
 
 ## API Endpoints
@@ -539,6 +560,8 @@ Lookup keys: S-01/E-02/L-03 shipped via #653; S-02/E-01/E-05/B-01 (Phase 2) and 
 | GET | `/api/agents/{name}/circuit-breaker` | Unified breaker state: `{dispatch:{state,failure_count,retry_after_seconds}, transport:{...}, open:bool, config:{enabled,global_enabled}}` (#526) |
 | PUT | `/api/agents/{name}/circuit-breaker` | Enable/disable per-agent dispatch breaker (owner-only); engages only with global `DISPATCH_BREAKER_ENABLED` (#526) |
 | POST | `/api/agents/{name}/circuit-breaker/reset` | Admin-only; resets BOTH transport and dispatch breakers to closed (#921, #526) |
+| GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
+| POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
 
 **Note**: Route ordering is critical — static routes (`/context-stats`, `/autonomy-status`) must be defined BEFORE the `/{name}` catch-all (Invariant #4).
 
@@ -1445,6 +1468,22 @@ CREATE TABLE idempotency_keys (
 CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);
 ```
 
+**agent_compatibility_results** (#668 — see [Agent Compatibility Validation](#agent-compatibility-validation-668)). Latest-snapshot-per-agent (one row, upserted by `agent_name`); STATIC recomputes live, persisted AI verdicts merge in. Dual-track migration (SQLite `db/migrations.py` + Alembic `migrations/versions/0003_*`); cascade/rename via `AGENT_REFS`:
+```sql
+CREATE TABLE agent_compatibility_results (
+    agent_name TEXT PRIMARY KEY,
+    overall_status TEXT NOT NULL,        -- compatible | issues | unavailable
+    checks_json TEXT NOT NULL,           -- full last report's check list (JSON)
+    hard_count INTEGER NOT NULL DEFAULT 0,
+    soft_count INTEGER NOT NULL DEFAULT 0,
+    info_count INTEGER NOT NULL DEFAULT 0,
+    container_running INTEGER NOT NULL DEFAULT 0,
+    ai_ran_at TEXT,                      -- last AI evaluation (NULL = never)
+    static_ran_at TEXT,
+    updated_at TEXT NOT NULL
+);
+```
+
 ### Redis
 
 - **Credential storage (DEPRECATED — CRED-002)**: credentials moved to encrypted files in agent workspaces (`.env` + `.credentials.enc`); legacy keys (`credentials:{id}:*`, `user:{id}:credentials`, `agent:{name}:credentials`) kept for backward compatibility only.
@@ -1452,6 +1491,7 @@ CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);
 - **Heartbeat keys**: see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307). All heartbeat ops are within the backend Redis ACL (`-@dangerous`) and follow the `agent:*` naming convention.
 - **Capacity/breaker keys**: `agent:slots:{name}` (ZSET) + `agent:slot:{name}:{eid}` (HASH), `agent:circuit:{name}`, `agent:dispatch:{name}`, `canary:drain_tick_at` — see the respective subsystem blocks.
 - **Session tab keys**: `session_lock:*`, `session_inflight:*` — see [Session Tab](#session-tab).
+- **Compatibility fix lock**: `compat_fix:{name}` (SET NX, 30s TTL) serialises the per-agent gitignore auto-fix read-modify-write (#668).
 
 ---
 

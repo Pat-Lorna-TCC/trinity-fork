@@ -804,3 +804,72 @@ class AgentSchedulesSummaryResponse(BaseModel):
     schedule_count: int
     tool_calls_sampled: bool = False
     schedules: List[ScheduleSummaryRow] = []
+
+
+# =============================================================================
+# Agent Compatibility Validation (#668)
+# =============================================================================
+
+class CompatibilityCheck(BaseModel):
+    """Result of a single compatibility check (one row from the spec catalog).
+
+    `status` is the check outcome: "pass" (compliant), "fail" (issue found), or
+    "skipped" (not evaluated — e.g. AI checks with no API key, or a check that
+    doesn't apply to this agent's runtime). `severity` is the catalog severity
+    (hard | soft | info); AI-evaluated checks are capped at SOFT since their
+    verdict is non-deterministic (HARD is reserved for deterministic STATIC
+    checks). `detail` carries safe, redacted specifics (line numbers, patterns)
+    — never a secret value.
+    """
+    check_id: str  # "F-001", "S-003", "C-002", ...
+    category: str  # human-readable category name
+    severity: str  # "hard" | "soft" | "info"
+    type: str  # "static" | "ai"
+    status: str  # "pass" | "fail" | "skipped"
+    message: str
+    auto_fixable: bool = False
+    explanation: Optional[str] = None  # AI rationale / extra context (markdown)
+    confidence: Optional[float] = None  # AI confidence 0..1 (None for STATIC)
+    detail: Optional[Dict] = None  # redacted specifics (location, pattern)
+    skip_reason: Optional[str] = None  # why a check was skipped
+
+
+class CompatibilityReport(BaseModel):
+    """Aggregate compatibility report for one agent (#668).
+
+    `overall_status`: "compatible" (no hard/soft failures), "issues" (≥1
+    hard/soft failure), or "unavailable" (couldn't read the workspace — e.g.
+    agent stopped, collector failure). `container_running` distinguishes the
+    degraded-stopped case from a genuine clean result. `ai_ran_at` is the
+    timestamp of the last AI evaluation (None if never run) so the UI can show
+    staleness and a re-run affordance.
+    """
+    agent_name: str
+    container_running: bool
+    overall_status: str  # "compatible" | "issues" | "unavailable"
+    runtime: Optional[str] = None  # agent runtime (claude | gemini | codex)
+    checks: List[CompatibilityCheck] = []
+    hard_count: int = 0
+    soft_count: int = 0
+    info_count: int = 0
+    ai_ran_at: Optional[str] = None
+    static_ran_at: Optional[str] = None
+    message: Optional[str] = None  # human note for the unavailable case
+
+
+class CompatibilityFixRequest(BaseModel):
+    """Request to auto-fix a single correctable compatibility check (#668)."""
+    check_id: str
+
+
+class CompatibilityFixResponse(BaseModel):
+    """Result of an auto-fix attempt (#668).
+
+    `uncommitted` is always true on success: the fix edits the in-container
+    `.gitignore` only — committing/pushing is the agent's own git-sync job, so
+    the change is not yet on GitHub until the next sync.
+    """
+    check_id: str
+    fixed: bool
+    message: str
+    uncommitted: bool = True

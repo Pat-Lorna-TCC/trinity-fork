@@ -136,6 +136,7 @@ from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
+from db.compatibility import CompatibilityOperations
 from db.sync_state import SyncStateOperations
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
@@ -353,6 +354,7 @@ class DatabaseManager:
         self._access_request_ops = AccessRequestOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
+        self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -2227,6 +2229,22 @@ class DatabaseManager:
     def get_canary_stats(self, start_time: str = None, end_time: str = None):
         """Aggregate canary violation counts by invariant_id and severity."""
         return self._canary_ops.stats_by_invariant(start_time=start_time, end_time=end_time)
+
+    # =========================================================================
+    # Agent compatibility results (#668 — delegated to db/compatibility.py)
+    # =========================================================================
+
+    def upsert_compatibility_result(self, agent_name: str, **kwargs):
+        """Upsert the latest compatibility snapshot for an agent. See CompatibilityOperations."""
+        return self._compatibility_ops.upsert_result(agent_name, **kwargs)
+
+    def get_compatibility_result(self, agent_name: str):
+        """Fetch the latest persisted compatibility report for an agent (or None)."""
+        return self._compatibility_ops.get_result(agent_name)
+
+    def count_agents_with_hard_compatibility_findings(self) -> int:
+        """Fleet aggregation: number of agents with ≥1 HARD compatibility finding."""
+        return self._compatibility_ops.count_agents_with_hard_findings()
 
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
