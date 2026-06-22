@@ -159,10 +159,14 @@ _SECRET_PATTERNS = [
     (re.compile(r"AKIA[A-Z0-9]{16}"), "aws access key (AKIA)"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key block"),
 ]
+# NOTE: the value is captured greedily to end-of-line (`(.*)$`) and stripped by
+# the caller — NOT `[ \t]*(.+?)[ \t]*$`. The trailing-whitespace trim around a
+# lazy `.+?` made `.+?` and `[ \t]*` both able to match a tab, giving polynomial
+# backtracking on agent-supplied text with long `\t` runs (py/polynomial-redos).
 _ASSIGN_RE = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+)?"
     r"([A-Za-z_][A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD))"
-    r"[ \t]*[:=][ \t]*(.+?)[ \t]*$"
+    r"[ \t]*[:=](.*)$"
 )
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(your[-_ ]|placeholder|changeme|change[-_ ]me|example|xxxx|<[^>]+>|\.\.\.|todo|fixme|dummy|sample)"
