@@ -177,7 +177,7 @@ forwards it. The full `VOIP_*` set is wired into the `backend.environment:` bloc
 of **both** `docker-compose.yml` (dev) and `docker-compose.prod.yml` (prod, which
 launches standalone with no base-compose merge), plus the `VOICE_*` flags for
 parity, and is documented in `.env.example`. Omitting these from the prod compose
-was the original packaging gap (same class as #1039's `LOG_*` no-op) — the
+was the original packaging gap (same class as the `LOG_*` data-retention no-op) — the
 supported `.env` lever did nothing because it never reached the container. The
 enterprise prod overlay (`docker-compose.prod.enterprise.yml`) inherits this env
 block, so no separate wiring is needed there.
