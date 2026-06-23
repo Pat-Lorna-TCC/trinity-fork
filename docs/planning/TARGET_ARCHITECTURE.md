@@ -520,6 +520,24 @@ See `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint seq
 
 ---
 
+## Incubating Directions (Not Yet Decided)
+
+Forward-looking directions captured for evaluation — **not** committed architecture and **not**
+on the current critical path. They incubate in the private tracker until a build/defer/reject
+decision is made.
+
+- **Goal-directed control surface** — make Trinity an optional *environment* for goal-seeking
+  agents: a first-class **Objective** + **policies**, a **roster** of recruitable agents, and
+  **externally-measured evaluations** (Trinity scores the work; the agent does not grade itself),
+  closed by an agent-owned optimization loop. Framed as the capstone over the Semantic Health
+  Score, GuardAgent (#947), collaborator injection (#171), A2A Agent Cards (#737), and the
+  `systems` grouping. Strictly bounded by CLAUDE.md §8 ("Trinity ≠ DAG engine"): Trinity provides
+  the objective, the eval/scoreboard, the roster, and the levers; the *optimization loop and peer
+  dispatch live in a manager agent*, never in backend transition logic. Naturally sequenced
+  **after** the pull migration + PostgreSQL (#300). Incubating in `abilityai/trinity-enterprise#27`.
+
+---
+
 ## Review Schedule
 
 | Trigger | Action |
