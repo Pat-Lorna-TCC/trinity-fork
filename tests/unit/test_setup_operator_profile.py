@@ -8,21 +8,16 @@ removed in #49, so there is no token machinery to stub here.
 
 Import isolation (read before "simplifying" the lazy `_get_setup()` below):
 `routers.setup` pulls in database/dependencies/services, which import several
-backend `utils.*` leaves. The test harness pins `sys.modules["utils"]` to
-tests/utils (for api_client, etc.) and preloads only `utils.helpers`; a bare
-`from utils.<other> import …` at COLLECTION time flips `sys.modules["utils"]` to
-the backend package and breaks tests/utils consumers collected alongside us
-(e.g. test_setup.py's `utils.api_client`). That is exactly how the CI
-regression-diff "head" run failed (it collects the changed unit + integration
-tests together). So we do NOT import `routers.setup` at module level — collection
-stays backend-free — and defer the import (plus a spec-based preload of the
-backend utils leaves that does NOT touch `sys.modules["utils"]`) to first use
-inside the tests, which run after collection completes.
+backend `utils.*` leaves. Importing it at module level runs that chain during
+COLLECTION; in the CI backend-unit gate (`cd tests && pytest unit/`) the
+perturbation of sys.modules mid-collection interrupted the *entire* unit suite
+(the head side collected ~2 of 2734 tests → the regression-diff gate flagged it).
+So we do NOT import `routers.setup` at module level — collection stays
+backend-free — and defer it to `_get_setup()`, called inside the tests after
+collection completes (when `tests/unit/conftest.py` has made `utils` the backend
+package, so the import resolves natively).
 """
 import asyncio
-import importlib.util
-import sys
-from pathlib import Path
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
@@ -30,42 +25,27 @@ from pydantic import ValidationError
 
 pytestmark = pytest.mark.unit
 
-_BACKEND_UTILS = Path(__file__).resolve().parents[2] / "src" / "backend" / "utils"
 _setup_module = None
 
 
 def _get_setup():
     """Import `routers.setup` lazily (at test run time, not collection time).
 
-    Pre-registers the backend `utils.*` leaves as `utils.<name>` first — the same
-    spec-based pattern conftest uses for `utils.helpers` — WITHOUT replacing
-    `sys.modules["utils"]`, so the heavy import chain resolves cleanly and
-    tests/utils stays intact. Three passes resolve inter-leaf imports regardless
-    of order. Cached so the work happens once per session.
+    Importing it at module level pulls in database/dependencies/services and
+    their many backend `utils.*` leaves during COLLECTION; in the CI backend-unit
+    gate (`cd tests && pytest unit/`) that perturbs sys.modules mid-collection and
+    interrupts the whole unit suite. Deferring to first use keeps collection to
+    stdlib/pytest/fastapi/pydantic. At run time the unit conftest
+    (`tests/unit/conftest.py`) has already installed src/backend/utils as the
+    canonical `utils` package, so the backend `utils.*` leaves resolve natively —
+    no manual sys.modules juggling (which the #762 lint forbids anyway). Cached so
+    the import happens once per session.
     """
     global _setup_module
-    if _setup_module is not None:
-        return _setup_module
-    for _ in range(3):
-        for name in ("helpers", "errors", "credential_sanitizer",
-                     "password_validation", "url_validation", "image_optimize"):
-            full = f"utils.{name}"
-            existing = sys.modules.get(full)
-            if existing is not None and "src/backend" in str(getattr(existing, "__file__", "")):
-                continue
-            path = _BACKEND_UTILS / f"{name}.py"
-            if not path.exists():
-                continue
-            spec = importlib.util.spec_from_file_location(full, str(path))
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[full] = mod
-            try:
-                spec.loader.exec_module(mod)
-            except Exception:
-                sys.modules.pop(full, None)  # let a later pass / import retry
-    import routers.setup as setup
-    _setup_module = setup
-    return setup
+    if _setup_module is None:
+        import routers.setup as setup
+        _setup_module = setup
+    return _setup_module
 
 
 class FakeDB:
