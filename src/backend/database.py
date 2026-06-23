@@ -741,6 +741,12 @@ class DatabaseManager:
     def set_voice_system_prompt(self, agent_name: str, prompt: str):
         return self._agent_ops.set_voice_system_prompt(agent_name, prompt)
 
+    def get_voice_name(self, agent_name: str):
+        return self._agent_ops.get_voice_name(agent_name)
+
+    def set_voice_name(self, agent_name: str, voice_name):
+        return self._agent_ops.set_voice_name(agent_name, voice_name)
+
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
     # =========================================================================
@@ -1959,6 +1965,9 @@ class DatabaseManager:
 
     def delete_voip_binding(self, agent_name):
         return self._voip_ops.delete_binding(agent_name)
+
+    def set_voip_enabled(self, agent_name, enabled):
+        return self._voip_ops.set_enabled(agent_name, enabled)
 
     def create_voip_call_log(self, call_id, agent_name, to_number, chat_session_id=None,
                             initiated_by_user_id=None, initiated_by_email=None,

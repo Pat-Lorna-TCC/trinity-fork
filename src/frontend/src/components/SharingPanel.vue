@@ -219,6 +219,13 @@
     <!-- WhatsApp (Twilio) Section -->
     <WhatsAppChannelPanel :agent-name="agentName" />
 
+    <!-- Voice Calls (VoIP) Section (#28) — gated on platform voip_available -->
+    <template v-if="sessionsStore.voipAvailable">
+      <!-- Divider -->
+      <div class="border-t border-gray-200 dark:border-gray-700"></div>
+      <VoipChannelPanel :agent-name="agentName" />
+    </template>
+
     <!-- Divider -->
     <div class="border-t border-gray-200 dark:border-gray-700"></div>
 
@@ -244,7 +251,9 @@ import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
+import VoipChannelPanel from './VoipChannelPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
+import { useSessionsStore } from '../stores/sessions'
 
 const props = defineProps({
   agentName: {
@@ -261,6 +270,11 @@ const emit = defineEmits(['agent-updated'])
 
 const agentsStore = useAgentsStore()
 const { showNotification } = useNotification()
+
+// VoIP panel visibility (#28) — gated purely on the platform `voip_available`
+// flag (VOIP_ENABLED && GEMINI_API_KEY). Cached, idempotent, fire-and-forget.
+const sessionsStore = useSessionsStore()
+sessionsStore.loadFeatureFlags()
 
 // Create agent ref for composable
 const agent = ref({ name: props.agentName, shares: props.shares })

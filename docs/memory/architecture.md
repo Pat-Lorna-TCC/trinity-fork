@@ -566,20 +566,24 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library:
 
 **Note**: Route ordering is critical — static routes (`/context-stats`, `/autonomy-status`) must be defined BEFORE the `/{name}` catch-all (Invariant #4).
 
-### Voice (5 endpoints)
+### Voice (6 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/agents/{name}/voice/start` | Start Gemini Live voice session; `workspace_mode` enables panel tools |
+| POST | `/api/agents/{name}/voice/start` | Start Gemini Live voice session; `workspace_mode` enables panel tools. Resolves voice as request override → persisted `voice_name` → `Kore` (#28) |
 | POST | `/api/agents/{name}/voice/stop` | Stop active voice session |
 | GET/PUT | `/api/agents/{name}/voice/prompt` | Get/set per-agent voice system prompt |
+| GET/PUT | `/api/agents/{name}/voice/name` | Get (any accessor; returns `available_voices`/`default_voice`) / set (owner-only; 400 on a voice outside `GEMINI_VOICE_NAMES`) the persisted per-agent Gemini voice. Applies to both the voice overlay/workspace and outbound VoIP calls (#28) |
 | GET | `/api/agents/{name}/voice/{session_id}/panel` | Canvas panel state for workspace mode (ownership-gated; empty state when session gone, #699) |
 
 ### VoIP Telephony (VOIP-001, #1056 — flag-gated, default OFF)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET/PUT/DELETE | `/api/agents/{name}/voip` | Owner | Twilio-voice binding status / configure / remove. 404 when `voip_available` off |
+| GET/PUT/DELETE | `/api/agents/{name}/voip` | Owner | Twilio-voice binding status / configure / remove. 404 when `voip_available` off. Re-PUT preserves the `enabled` flag (#28) |
+| PUT | `/api/agents/{name}/voip/enabled` | Owner | Enable/disable the binding without re-entering credentials (`{enabled: bool}`); 404 when no binding exists. Disabled ⇒ outbound calls refused (#28) |
 | POST | `/api/agents/{name}/voip/call` | JWT/MCP (`AuthorizedAgent`) | Place outbound call; rate-limited + daily-capped; optional `Idempotency-Key`. Returns `{call_id, status:"ringing", twilio_call_sid}` |
 | WS | `/api/voip/voice/{call_id}` | Call-bound ticket | Twilio Media Streams audio bridge — see [VoIP](#voip-telephony-voip-001-1056) |
+
+The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing tab (`components/VoipChannelPanel.vue`), shown only when the platform `voip_available` flag is true (frontend reads it via `stores/sessions.js`); the underlying CRUD/voice endpoints are OSS and ungated (#28).
 
 ### Activities (1 endpoint)
 | Method | Path | Description |
@@ -862,6 +866,7 @@ CREATE TABLE agent_ownership (
     max_backlog_depth INTEGER DEFAULT 50,          -- BACKLOG-001
     group_auth_mode TEXT DEFAULT 'none',
     voice_system_prompt TEXT,
+    voice_name TEXT,                               -- #28: persisted Gemini voice (NULL → 'Kore')
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in
