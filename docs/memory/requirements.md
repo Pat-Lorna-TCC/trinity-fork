@@ -1165,12 +1165,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
 - **Phase 2 (deferred)**:
   - `#311` unified access control: `/login <email>` command flow, verified-email gate, `access_requests` pipeline (schema columns `verified_email`/`verified_at` shipped up-front so Phase 2 is application-only)
+- **Phase 3 (partial)**:
+  - **Outbound media attachments (shipped — #1315)**: `WhatsAppAdapter.send_response` delivers `ChannelResponse.files` as Twilio `MediaUrl` attachments — one message per file (WhatsApp permits a single media per message), text sent first. Each file is persisted to FILES-001 storage via `create_share_from_bytes` and handed to Twilio as its public `?sig=` URL (Twilio fetches it server-side). Gated on the per-agent `file_sharing_enabled` toggle. Short 1h share TTL (the cleanup-service reaper purges expired shares). Graceful text-link fallback when `public_chat_url` is unset/non-HTTPS, the MIME is unsupported, or the file exceeds WhatsApp caps (image/audio/video ≈5 MB, documents ≈16 MB) — never silently dropped.
 - **Phase 3 (deferred)**:
   - SMS on the same Twilio binding (drop `whatsapp:` prefix)
   - Message templates for outbound-first conversations outside the 24h customer-service window (Twilio Content Builder)
   - Interactive buttons and list messages (Twilio Content API)
   - Voice-note transcription (Whisper API)
-  - Outbound file sharing
+  - Promoting FILES-001 share URLs already present in `response.text` to `MediaUrl` (#1315 option b)
 - **Out of scope**:
   - WhatsApp group chats — not supported by Twilio's WhatsApp API
   - Meta Cloud API direct integration — future alternative; not this PR
