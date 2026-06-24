@@ -160,6 +160,11 @@
             </div>
 
             <!-- Sharing Tab Content -->
+            <!-- Access Tab Content (#17 — Trinity operators) -->
+            <div v-if="activeTab === 'access' && agent.can_share">
+              <AccessPanel :agent-name="agent.name" />
+            </div>
+
             <div v-if="activeTab === 'sharing' && agent.can_share">
               <SharingPanel
                 :agent-name="agent.name"
@@ -303,6 +308,7 @@ import AvatarGenerateModal from '../components/AvatarGenerateModal.vue'
 import LogsPanel from '../components/LogsPanel.vue'
 import CredentialsPanel from '../components/CredentialsPanel.vue'
 import SharingPanel from '../components/SharingPanel.vue'
+import AccessPanel from '../components/AccessPanel.vue'
 import PermissionsPanel from '../components/PermissionsPanel.vue'
 import FilesPanel from '../components/FilesPanel.vue'
 import TerminalPanelContent from '../components/TerminalPanelContent.vue'
@@ -728,6 +734,7 @@ const visibleTabs = computed(() => {
 
   // Access control tabs - hide for system agent (system agent has full access)
   if (agent.value?.can_share && !isSystem) {
+    tabs.push({ id: 'access', label: 'Access' })  // #17 operators (Trinity users)
     tabs.push({ id: 'sharing', label: 'Sharing' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
   }
