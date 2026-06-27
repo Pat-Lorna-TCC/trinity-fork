@@ -106,6 +106,7 @@
 - `agent_dashboard.py` - Agent-defined dashboard (dashboard.yaml)
 - `alerts.py` - Cost threshold alerts
 - `notifications.py` - Agent notifications
+- `reports.py` - Agent-published structured reports (#918) — see [Agent Reports](#agent-reports-918)
 - `operator_queue.py` - Operating Room queue (OPS-001)
 - `ops.py` - Operating Room sync service
 - `logs.py` - Container log endpoints
@@ -267,6 +268,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `pipelines.ts` (2) | `list_agent_pipelines`, `get_agent_pipeline_state` | Read-only introspection of an agent's self-published pipelines (`~/.trinity/pipelines/*.yaml` + `~/.trinity/pipeline-state/<id>/<instance>.json`) over the **existing** `agent_files` surface — no backend/DB change (Invariant #8). Strict `^[A-Za-z0-9._-]+$` id validation (path-traversal guard), hardened YAML parse (size cap + dup-key + alias guard), latest-instance by mtime, only-404→empty (#919) |
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
+| `reports.ts` (1) | `report` | Publish a structured report; agent resolved from auth context (self-only), backend self-gates the path agent (#918) |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
 | `git.ts` (6) | `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state` | Direct, deterministic (non-LLM) git operations — bypass `chat_with_agent` for status/sync/log/pull/sync-state and the destructive `reset_to_main_preserve_state` recovery. Conflicts stay LLM-mediated: a 409 surfaces `X-Conflict-Type`/`X-Conflict-Class` verbatim + a `chat_with_agent` hint. Mutating ops (`git_sync`/`reset`) are `OwnedAgentByName` (owner-only; a shared key gets read+pull only); agent-scoped keys gated to `{self} ∪ permitted` at the MCP layer. Each call mints a `requestId` it stamps on its `mcp_operation` audit row AND forwards as `X-Request-ID`, so the paired backend `git_operation` row joins via `GET /api/audit-log?request_id=` (#905) |
@@ -449,6 +451,35 @@ Bounded sequential task execution against one agent. Runner is an in-process `as
 Per-agent opt-in (`agent_ownership.file_sharing_enabled`). The agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); on share, the backend extracts the named file via Docker SDK `get_archive` (never mounts the workspace — isolated blast radius) and stores bytes at `/data/agent-files/{file_id}`. `agent_shared_files_service.py` handles path validation, MIME blocklist, quota, extraction, URL building.
 
 Download URL: `{public_chat_url}/api/files/{file_id}?sig={token}` — `?sig=` (NOT `?download_token=`) so the credential sanitizer's `.*TOKEN.*` pattern doesn't redact it in transcripts. Cascades manual per platform convention: agent delete removes rows + files + volume; `rename_agent()` updates `agent_name` across 17 tables. MCP tool `share_file`.
+
+### Agent Reports (#918)
+
+Agent-published structured reports (telemetry / domain results) surfaced on the dashboard
+without reading chat. Three-surface clone of `agent_activities`: `routers/reports.py` →
+`services/report_service.py` (create + broadcast only; reads go router→`db/reports.py`
+directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{name}/reports`.
+
+- **Self-gated create**: `AuthorizedAgent` checks owner-access to the path agent, but an
+  agent-scoped key could otherwise report as a *sibling* agent the owner shares; the endpoint
+  additionally requires `current_user.agent_name == name` for agent-scoped callers (mirrors
+  `authorize_heartbeat`). Payload capped at 256 KB → 413; fields strictly validated in
+  `ReportCreate`. Create is rate-limited per agent (`REPORT_RATE_LIMIT`/30 per 60s, shared
+  `services/rate_limiter.py`, fail-open) so a runaway agent can't flood the table between
+  retention sweeps → 429.
+- **Thin WS trigger**: `/ws` is `SCOPE_ALL` and unfiltered, so the `agent_report` broadcast
+  carries only `{agent_name, report_id, report_type, created_at}` — never `title`/`payload`
+  (which can be sensitive). The frontend store refetches via the access-controlled REST
+  endpoints (the `notifications` pattern). Regression-guarded by
+  `tests/unit/test_918_report_broadcast.py`.
+- **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
+  `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
+- **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
+  `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
+  pick by `display_hint` → `report_type` prefix → JSON, with shape-validation fallback to JSON.
+- **Retention**: `cleanup_service` `_sweep_retention_772` prunes rows past
+  `agent_reports_retention_days` (default 90, `0` disables) via `db.prune_agent_reports`
+  (chunked, `idx_agent_reports_created`). Table `agent_reports`; dual migration (SQLite
+  `agent_reports_table` + Alembic `0006_agent_reports`).
 
 ### Agent Runtime Data — `data_paths` + Snapshot/Export (#1169)
 
@@ -1490,6 +1521,29 @@ CREATE TABLE agent_compatibility_results (
     static_ran_at TEXT,
     updated_at TEXT NOT NULL
 );
+```
+
+**agent_reports** (#918 — see [Agent Reports](#agent-reports-918)). Dual-track migration
+(SQLite `agent_reports_table` + Alembic `0006_agent_reports`). `user_id` = the MCP-key/JWT
+owner who authored the report (not necessarily the agent owner):
+```sql
+CREATE TABLE agent_reports (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_id INTEGER,                     -- author = MCP-key owner (current_user.id)
+    report_type TEXT NOT NULL,           -- namespaced, e.g. 'recon.weekly_summary'
+    title TEXT NOT NULL,
+    payload TEXT NOT NULL,               -- arbitrary JSON, ≤256 KB (413 over cap)
+    display_hint TEXT,                   -- table|kpi|markdown|timeline|json|NULL
+    schema_version INTEGER DEFAULT 1,
+    period_start TEXT,
+    period_end TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX idx_agent_reports_agent   ON agent_reports(agent_name, created_at DESC);
+CREATE INDEX idx_agent_reports_type    ON agent_reports(report_type, created_at DESC);
+CREATE INDEX idx_agent_reports_created ON agent_reports(created_at);  -- retention sweep
 ```
 
 ### Redis
