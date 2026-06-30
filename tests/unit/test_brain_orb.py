@@ -11,16 +11,20 @@ container. The full data path (real container export) is covered by /verify.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import stat
 import types
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import routers.agent_brain_orb as bo
-from dependencies import get_authorized_agent_by_name
+from dependencies import get_authorized_agent_by_name, get_owned_agent_by_name
 
 _AGENT = "cornelius"
 
@@ -44,10 +48,11 @@ class _FakeClientCM:
 
     async def __aenter__(self):
         client = AsyncMock()
+        # The proxy calls client.request(method, url, content=...) for all routes.
         if self._exc is not None:
-            client.get = AsyncMock(side_effect=self._exc)
+            client.request = AsyncMock(side_effect=self._exc)
         else:
-            client.get = AsyncMock(return_value=self._result)
+            client.request = AsyncMock(return_value=self._result)
         return client
 
     async def __aexit__(self, *_a):
@@ -70,7 +75,9 @@ def _resp(status_code: int, content: bytes = b""):
 def client(monkeypatch):
     app = FastAPI()
     app.include_router(bo.router)
+    # Read routes use AuthorizedAgentByName; the mutating /scope uses OwnedAgentByName.
     app.dependency_overrides[get_authorized_agent_by_name] = lambda: _AGENT
+    app.dependency_overrides[get_owned_agent_by_name] = lambda: _AGENT
     # Flag ON by default; individual tests flip it off. container_reload is async.
     monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", True)
     monkeypatch.setattr(bo, "container_reload", AsyncMock())
@@ -153,29 +160,152 @@ def test_timeout_maps_to_504(client):
     assert r.status_code == 504
 
 
-# --- agent-server route: file read -----------------------------------------
+# --- backend proxy: scopes (read) + scope (owner mutation) — #58 Phase 2 ----
+
+_SCOPES_URL = f"/api/agents/{_AGENT}/brain-orb/scopes"
+_SCOPE_URL = f"/api/agents/{_AGENT}/brain-orb/scope"
+
+
+def test_scopes_success_passes_through(client):
+    payload = b'{"active":["core"],"available":[{"token":"core"}]}'
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(200, payload))
+    ):
+        r = client.get(_SCOPES_URL)
+    assert r.status_code == 200
+    assert r.json() == {"active": ["core"], "available": [{"token": "core"}]}
+
+
+def test_scopes_flag_off_404(client, monkeypatch):
+    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    with patch.object(bo, "get_agent_container", return_value=_running()):
+        r = client.get(_SCOPES_URL)
+    assert r.status_code == 404
+
+
+def test_scopes_unsupported_maps_to_404(client):
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(404))
+    ):
+        r = client.get(_SCOPES_URL)
+    assert r.status_code == 404
+
+
+def test_scope_post_success_passes_through(client):
+    payload = b'{"ok":true,"active":["core","Books"],"nodes":1200,"edges":3000}'
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(200, payload))
+    ):
+        r = client.post(_SCOPE_URL, json={"tokens": ["core", "Books"]})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["active"] == ["core", "Books"]
+
+
+def test_scope_post_flag_off_404(client, monkeypatch):
+    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    with patch.object(bo, "get_agent_container", return_value=_running()):
+        r = client.post(_SCOPE_URL, json={"tokens": []})
+    assert r.status_code == 404
+
+
+def test_scope_post_body_too_large_413(client):
+    # > 64 KiB raw body — rejected before any agent call (no patches needed).
+    r = client.post(_SCOPE_URL, json={"tokens": ["x" * 70_000]})
+    assert r.status_code == 413
+
+
+def test_scope_post_unsupported_maps_to_404(client):
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(404))
+    ):
+        r = client.post(_SCOPE_URL, json={"tokens": []})
+    assert r.status_code == 404
+
+
+# --- agent-server routes: data read + scope hooks --------------------------
+
+def _write_hook(path, script: str):
+    """Write an executable convention hook (shebang-selected) for the agent-server."""
+    path.write_text(script)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
 
 @pytest.fixture
-def agent_client(tmp_path, monkeypatch):
+def agent_env(tmp_path, monkeypatch):
     from agent_server.routers import brain_orb as asbo
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
     monkeypatch.setattr(asbo, "DATA_PATH", tmp_path / "data.json")
+    monkeypatch.setattr(asbo, "_SCOPES_HOOK", hooks / "scopes")
+    monkeypatch.setattr(asbo, "_SCOPE_HOOK", hooks / "scope")
+    monkeypatch.setattr(asbo, "_HOME", tmp_path)   # subprocess cwd must exist on the test host
     app = FastAPI()
     app.include_router(asbo.router)
     # NB: AgentAuthMiddleware intentionally omitted — covered by its own tests;
-    # here we exercise the route's read/404 logic in isolation.
-    return TestClient(app), tmp_path / "data.json"
+    # here we exercise the route read / hook-exec logic in isolation.
+    return types.SimpleNamespace(
+        client=TestClient(app), asbo=asbo, data=tmp_path / "data.json",
+        scopes_hook=hooks / "scopes", scope_hook=hooks / "scope",
+    )
 
 
-def test_agent_server_serves_data_when_present(agent_client):
-    client, path = agent_client
-    path.write_text('{"ok":1}')
-    r = client.get("/api/brain-orb/data")
+def test_agent_server_serves_data_when_present(agent_env):
+    agent_env.data.write_text('{"ok":1}')
+    r = agent_env.client.get("/api/brain-orb/data")
     assert r.status_code == 200
     assert r.json() == {"ok": 1}
     assert r.headers["content-type"].startswith("application/json")
 
 
-def test_agent_server_404_when_absent(agent_client):
-    client, _path = agent_client
-    r = client.get("/api/brain-orb/data")
+def test_agent_server_404_when_absent(agent_env):
+    r = agent_env.client.get("/api/brain-orb/data")
     assert r.status_code == 404
+
+
+def test_agent_server_scopes_present(agent_env):
+    _write_hook(agent_env.scopes_hook,
+                '#!/bin/sh\necho \'{"active":["core"],"available":[{"token":"core"}]}\'\n')
+    r = agent_env.client.get("/api/brain-orb/scopes")
+    assert r.status_code == 200
+    assert r.json() == {"active": ["core"], "available": [{"token": "core"}]}
+
+
+def test_agent_server_scopes_absent_404(agent_env):
+    r = agent_env.client.get("/api/brain-orb/scopes")
+    assert r.status_code == 404
+
+
+def test_agent_server_scope_forwards_stdin(agent_env):
+    # The hook echoes the received stdin body back, proving forwarding end-to-end.
+    _write_hook(agent_env.scope_hook,
+                '#!/bin/sh\nbody=$(cat)\necho "{\\"ok\\":true,\\"received\\":$body}"\n')
+    r = agent_env.client.post("/api/brain-orb/scope", json={"tokens": ["core", "Books"]})
+    assert r.status_code == 200
+    out = r.json()
+    assert out["ok"] is True
+    assert out["received"] == {"tokens": ["core", "Books"]}
+
+
+def test_agent_server_scope_absent_404(agent_env):
+    r = agent_env.client.post("/api/brain-orb/scope", json={"tokens": []})
+    assert r.status_code == 404
+
+
+def test_agent_server_scope_invalid_json_502(agent_env):
+    _write_hook(agent_env.scope_hook, '#!/bin/sh\necho "not json at all"\n')
+    r = agent_env.client.post("/api/brain-orb/scope", json={"tokens": []})
+    assert r.status_code == 502
+
+
+def test_agent_server_scope_nonzero_exit_502(agent_env):
+    _write_hook(agent_env.scope_hook, '#!/bin/sh\necho "{}"\nexit 3\n')
+    r = agent_env.client.post("/api/brain-orb/scope", json={"tokens": []})
+    assert r.status_code == 502
+
+
+def test_run_hook_timeout_504(agent_env):
+    _write_hook(agent_env.scope_hook, '#!/bin/sh\nsleep 5\necho "{}"\n')
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(agent_env.asbo._run_hook(agent_env.scope_hook, timeout=0.5))
+    assert ei.value.status_code == 504

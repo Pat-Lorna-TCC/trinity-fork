@@ -15,7 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
-| 2026-06-30 | trinity-enterprise#58 | feat(ui): Brain Orb — capability-gated per-agent 3D knowledge-graph page (static-render foundation; voice/control/transcript deferred). First-party CSP-clean orb assets + same-origin iframe host + read-only backend/agent-server proxy of the agent-produced `data.json` | [brain-orb.md](feature-flows/brain-orb.md) |
+| 2026-06-30 | trinity-enterprise#58 | feat(ui): Brain Orb — capability-gated per-agent 3D knowledge-graph page. Phase 1 (static render: first-party CSP-clean assets + same-origin iframe host + read-only `data.json` proxy) + Phase 2 (live scope mount/unmount → owner-gated agent re-export via `~/.trinity/brain-orb/` convention hooks → in-place rebuild). Voice/KB-actions/transcript deferred | [brain-orb.md](feature-flows/brain-orb.md) |
 | 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
 | 2026-06-29 | #506 | feat(capacity): admin fleet-wide `max_parallel_tasks` ceiling + runtime clamp + owner/admin UI | [capacity-management.md](feature-flows/capacity-management.md) |
 | 2026-06-29 | #894 | feat(channels): per-agent **public-channel model override** — owners pick the Claude model for public-facing chats (public link, Slack/Telegram/WhatsApp, x402) via the Sharing tab; additive NULL `agent_ownership.public_channel_model` (NULL→platform default), owner-only `GET`/`PUT /api/agents/{name}/public-channel-model`. Epic #1079. | [public-channel-model.md](feature-flows/public-channel-model.md) |

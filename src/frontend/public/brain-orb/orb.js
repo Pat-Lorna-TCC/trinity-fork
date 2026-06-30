@@ -32,12 +32,22 @@ const TRINITY_EMBED = (() => {
   return { ready };
 })();
 
+// Trinity-brokered control surface (#58 Phase 2): the per-agent proxy base + auth
+// header the data/scope fetches use once the embed init arrives, and whether live
+// scope control is available. Empty/false standalone (relative-path fallbacks).
+let ORB_HEADERS = {};
+let SCOPE_ENABLED = false;
+
 async function loadData(){
   if (window.AGENT_DATA) return window.AGENT_DATA;          // file:// safe
   const ctx = await TRINITY_EMBED.ready;
   if (ctx && ctx.agentName) {
-    const url = (ctx.apiBase || '') + '/api/agents/' + encodeURIComponent(ctx.agentName) + '/brain-orb/data';
-    const r = await fetch(url, { headers: ctx.authToken ? { Authorization: 'Bearer ' + ctx.authToken } : {} });
+    // Point every brokered fetch (data + scope control) at the per-agent proxy
+    // base and carry the platform JWT — replaces the old localhost voice proxy.
+    VOICE_PROXY = (ctx.apiBase || '') + '/api/agents/' + encodeURIComponent(ctx.agentName) + '/brain-orb';
+    ORB_HEADERS = ctx.authToken ? { Authorization: 'Bearer ' + ctx.authToken } : {};
+    SCOPE_ENABLED = true;
+    const r = await fetch(VOICE_PROXY + '/data', { headers: ORB_HEADERS });
     if (!r.ok) throw new Error('brain-orb data ' + r.status);
     return await r.json();
   }
@@ -1010,7 +1020,7 @@ searchInput.addEventListener('keydown',e=>{
 });
 
 /* ============================ voice tile + orb-control bridge ============================ */
-const VOICE_PROXY='';   // serves /note (any vault note) + KB tools
+let VOICE_PROXY='';   // brokered base (set from the embed init in loadData) — '' standalone
 let detachedNote=null;                        // a note opened from the vault but not in the graph
 // robust title match against the loaded nodes (handles .md, partials, word-order, sub/superstrings)
 function normTitle(s){ return (s||'').toLowerCase().replace(/\.md$/,'').replace(/[_]+/g,' ').replace(/\s+/g,' ').trim(); }
@@ -1243,7 +1253,7 @@ function toggleScopePanel(show){
 }
 async function loadScopes(){
   try{
-    const r=await fetch(VOICE_PROXY+'/scopes',{signal:AbortSignal.timeout(2500)});
+    const r=await fetch(VOICE_PROXY+'/scopes',{headers:ORB_HEADERS,signal:AbortSignal.timeout(6000)});
     const d=await r.json();
     SCOPE_AVAIL=d.available||[]; SCOPE_ACTIVE=d.active||[];
     renderScopePanel();
@@ -1312,18 +1322,20 @@ function resolveScopeToken(name){
   return null;
 }
 async function setScope(tokens){
-  if(!ACTIONS.enabled || !ACTIONS.token){ toast('scope control needs the brain-orb backend (run /brain-orb)'); return {error:'no backend'}; }
+  // #58 Phase 2: gated on the Trinity embed (platform JWT), not the old per-start
+  // voice-proxy token. The backend owner-gates the mutating /scope route.
+  if(!SCOPE_ENABLED){ toast('scope control unavailable'); return {error:'no backend'}; }
   if(scopeBusy) return {error:'busy'};
   scopeBusy=true; const sp=$('scopePanel'); sp&&sp.classList.add('busy');
   const ld=$('loading'); if(ld){ ld.textContent='remounting scope…'; ld.style.display=''; }
   try{
     const r=await fetch(VOICE_PROXY+'/scope',{method:'POST',
-      headers:{'Content-Type':'application/json','X-Orb-Token':ACTIONS.token},
+      headers:{'Content-Type':'application/json',...ORB_HEADERS},
       body:JSON.stringify({tokens})});
     const res=await r.json();
     if(res&&res.ok){
       SCOPE_ACTIVE=res.active||tokens;
-      const data=await (await fetch('./data.json?ts='+Date.now())).json();
+      const data=await (await fetch(VOICE_PROXY+'/data',{headers:ORB_HEADERS})).json();
       applyData(data);
       renderScopePanel();
       toast('scope · '+SCOPE_ACTIVE.length+' mounted · '+(res.nodes!=null?res.nodes:NODES.length)+' notes');

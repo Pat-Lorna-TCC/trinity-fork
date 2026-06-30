@@ -3418,11 +3418,11 @@ servers (each replica polls + reconciles independently).
 ## 46. Brain Orb — The Self-Rendering Mind (trinity-enterprise#58)
 
 **Description**: A capability-gated per-agent page that renders a Cornelius-class agent's live
-3D knowledge-graph orb from data the agent produces in its own container. **This requirement
-covers the static-render foundation only** — the orb visual + read path; the voice/control loop,
-KB-write actions, transcript capture, and headless-skill injection are deferred to later children
-of the tighter-Cornelius-integration epic. Default OFF — no impact on other agents or the UI. See
-[feature-flows/brain-orb.md](feature-flows/brain-orb.md).
+3D knowledge-graph orb from data the agent produces in its own container, with live scope control.
+**Shipped: static render (Phase 1, FR-1…5) + scope mount/unmount → re-export → live rebuild
+(Phase 2, FR-6).** Voice (Gemini Live), KB-write actions, transcript capture, and headless-skill
+injection remain deferred to later children of the tighter-Cornelius-integration epic. Default
+OFF — no impact on other agents or the UI. See [feature-flows/brain-orb.md](feature-flows/brain-orb.md).
 
 - **FR-1 — First-party CSP-clean assets**: the orb ships as verbatim first-party frontend assets
   (`public/brain-orb/`), with `three`/`marked`/`DOMPurify`/font vendored locally and the inline
@@ -3443,10 +3443,18 @@ of the tighter-Cornelius-integration epic. Default OFF — no impact on other ag
   `GET /api/brain-orb/data`, which streams `~/resources/agent-visualization/data.json`. Byte
   pass-through (no re-serialize of the multi-MB JSON); 404 when the flag is off / no export,
   503/504 unreachable, 502 agent error. Trinity never runs `export_data.py` (Invariant #8).
+- **FR-6 — Live scope control (Phase 2)**: the orb's scope panel mounts/unmounts vault scopes,
+  driving an agent re-export → live in-place rebuild (no reload). `GET /api/agents/{name}/brain-orb/scopes`
+  (`AuthorizedAgentByName`, read) lists selectable + active scopes; **`POST .../brain-orb/scope`
+  (`OwnedAgentByName` — owner/admin)** mutates the set. The agent provides two executable convention
+  hooks (`~/.trinity/brain-orb/{scopes,scope}`, mirrors `~/.trinity/pre-check`); the agent-server runs
+  them via hardened async subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards) and
+  404s when absent. The agent owns scope state + the re-export (Invariant #8); Trinity only brokers.
+  Replaces the local voice proxy's per-start `X-Orb-Token` with the platform JWT + owner gate.
 
-**Deferred (epic children)**: client-held Gemini Live voice tile · scope mount/unmount → live
-re-export · KB write actions · automatic transcript-capture pipeline · headless skill injection ·
-data-freshness/on-demand-refresh trigger · `data.json` caching/streaming.
+**Deferred (epic children)**: client-held Gemini Live voice tile · KB write actions · automatic
+transcript-capture pipeline · headless skill injection · data-freshness/on-demand-refresh trigger ·
+`data.json` caching/streaming.
 
 ---
 
