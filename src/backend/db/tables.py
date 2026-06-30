@@ -99,6 +99,7 @@ agent_ownership = Table(
     Column("guardrails_config", Text),
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),
+    Column("mcp_exposed", Integer),
     Column("deleted_at", Text),
 )
 
