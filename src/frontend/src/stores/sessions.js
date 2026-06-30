@@ -43,6 +43,7 @@ export const useSessionsStore = defineStore('sessions', {
     voiceAvailable: false,
     workspaceAvailable: false,
     voipAvailable: false,
+    brainOrbAvailable: false,      // trinity-enterprise#58 — Brain Orb platform flag
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
   }),
 
@@ -74,12 +75,14 @@ export const useSessionsStore = defineStore('sessions', {
         this.voiceAvailable = !!r.data?.voice_available
         this.workspaceAvailable = !!r.data?.workspace_available
         this.voipAvailable = !!r.data?.voip_available
+        this.brainOrbAvailable = !!r.data?.brain_orb_available
         this.claudeAuthConfigured = !!r.data?.claude_auth_configured
       } catch {
         this.sessionTabEnabled = false
         this.voiceAvailable = false
         this.workspaceAvailable = false
         this.voipAvailable = false
+        this.brainOrbAvailable = false
         this.claudeAuthConfigured = false
       } finally {
         this.featureFlagsLoaded = true

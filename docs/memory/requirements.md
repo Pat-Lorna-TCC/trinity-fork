@@ -3415,6 +3415,41 @@ servers (each replica polls + reconciles independently).
 
 ---
 
+## 46. Brain Orb — The Self-Rendering Mind (trinity-enterprise#58)
+
+**Description**: A capability-gated per-agent page that renders a Cornelius-class agent's live
+3D knowledge-graph orb from data the agent produces in its own container. **This requirement
+covers the static-render foundation only** — the orb visual + read path; the voice/control loop,
+KB-write actions, transcript capture, and headless-skill injection are deferred to later children
+of the tighter-Cornelius-integration epic. Default OFF — no impact on other agents or the UI. See
+[feature-flows/brain-orb.md](feature-flows/brain-orb.md).
+
+- **FR-1 — First-party CSP-clean assets**: the orb ships as verbatim first-party frontend assets
+  (`public/brain-orb/`), with `three`/`marked`/`DOMPurify`/font vendored locally and the inline
+  module externalized, so it runs under prod `script-src 'self'`/`font-src 'self'` with no nginx
+  change. Only mechanical orb edits (externalize, vendor, repoint data fetch, neutralize the
+  deferred voice proxy, hide deferred panels). Note bodies are DOMPurify-sanitized (H-005).
+- **FR-2 — Capability gating**: a `/agents/:name/brain` route (lazy + `beforeEnter` platform-flag
+  guard) and a Brain tab shown only when `brain_orb_available` (platform flag `BRAIN_ORB_ENABLED`,
+  default OFF) **AND** the agent's `template.yaml capabilities` list contains the generalizable
+  `brain-orb` token (surfaced by `/api/agents/{name}/info`) — never a hardcoded agent name.
+- **FR-3 — Same-origin iframe host**: `views/AgentBrainOrb.vue` embeds the first-party page in a
+  same-origin iframe (not agent-origin → avoids the #979 CSP trap, no Vue rewrite of the renderer).
+- **FR-4 — Auth via postMessage, standard Bearer**: the host hands the user's JWT to the iframe via
+  origin-pinned `postMessage` (never in a URL); the data route uses standard `AuthorizedAgentByName`
+  Bearer auth — no new ticket primitive. A `brain-orb:error` message shows an empty state.
+- **FR-5 — Read-only proxy (agent owns generation)**: `GET /api/agents/{name}/brain-orb/data`
+  (`AuthorizedAgentByName`) proxies via `agent_httpx_client` (#1159) to the agent-server
+  `GET /api/brain-orb/data`, which streams `~/resources/agent-visualization/data.json`. Byte
+  pass-through (no re-serialize of the multi-MB JSON); 404 when the flag is off / no export,
+  503/504 unreachable, 502 agent error. Trinity never runs `export_data.py` (Invariant #8).
+
+**Deferred (epic children)**: client-held Gemini Live voice tile · scope mount/unmount → live
+re-export · KB write actions · automatic transcript-capture pipeline · headless skill injection ·
+data-freshness/on-demand-refresh trigger · `data.json` caching/streaming.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

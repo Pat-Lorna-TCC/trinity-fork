@@ -61,6 +61,25 @@ const routes = [
     },
   },
   {
+    // #58 (trinity-enterprise) — Brain Orb: capability-gated per-agent page.
+    // Route guard checks only the platform flag (mirrors AgentWorkspace); the
+    // per-agent capability gate lives in AgentDetail's visibleTabs so a deep
+    // link to a non-Cornelius agent loads but renders the empty state.
+    path: '/agents/:name/brain',
+    name: 'AgentBrainOrb',
+    component: () => import('../views/AgentBrainOrb.vue'),
+    meta: { requiresAuth: true },
+    beforeEnter: async (to, from, next) => {
+      const sessionsStore = useSessionsStore()
+      await sessionsStore.loadFeatureFlags()
+      if (!sessionsStore.brainOrbAvailable) {
+        next({ name: 'AgentDetail', params: { name: to.params.name } })
+      } else {
+        next()
+      }
+    },
+  },
+  {
     path: '/agents/:name/executions/:executionId',
     name: 'ExecutionDetail',
     component: () => import('../views/ExecutionDetail.vue'),

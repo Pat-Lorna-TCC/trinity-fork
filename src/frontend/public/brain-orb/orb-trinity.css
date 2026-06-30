@@ -1,0 +1,38 @@
+/* Trinity brain-orb overrides — #58 static-render foundation.
+ * Loaded AFTER styles.css. Two jobs, both prod-CSP-clean (script-src/font-src 'self'):
+ *   1. Vendor JetBrains Mono locally (the Google Fonts <link> was dropped).
+ *   2. Hide the voice / scope / KB-action surfaces whose backend (the local voice
+ *      proxy) is deferred to a later epic child. The renderer JS stays verbatim —
+ *      these panels simply never render, and their now-neutralized fetches no-op. */
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./vendor/fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./vendor/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+
+/* Deferred (voice/control) surfaces — hidden via !important so renderer toggles
+ * (V / S / A keys, dock chips) can't reveal a non-functional panel. */
+#voiceTile,
+#scopePanel,
+#actions,
+#inspActions {
+  display: none !important;
+}
+
+/* Matching keyboard-hint rows in the controls legend: voice(2) / scope(8) / actions(11).
+ * Markup is frozen (verbatim orb), so positional selectors are stable. */
+#controls > div:nth-child(2),
+#controls > div:nth-child(8),
+#controls > div:nth-child(11) {
+  display: none !important;
+}

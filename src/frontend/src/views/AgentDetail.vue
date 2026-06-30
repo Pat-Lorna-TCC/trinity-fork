@@ -374,6 +374,9 @@ const emotionCycleTimer = ref(null)
 const taskPrefillMessage = ref('')
 const schedulePrefillMessage = ref('')
 const hasDashboard = ref(false)
+// #58 (trinity-enterprise) — Brain Orb: per-agent half of the gate. True when the
+// agent's template.yaml declares the generalizable `brain-orb` capability token.
+const hasBrainOrb = ref(false)
 
 // Tags state (ORG-001)
 const agentTags = ref([])
@@ -730,6 +733,12 @@ const visibleTabs = computed(() => {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
   }
 
+  // Brain Orb tab (#58) — platform flag AND per-agent capability. Selecting it
+  // navigates to the dedicated /agents/:name/brain route (handled by a watcher).
+  if (sessionsStore.brainOrbAvailable && hasBrainOrb.value) {
+    tabs.push({ id: 'brain', label: 'Brain' })
+  }
+
   tabs.push(
     { id: 'reports', label: 'Reports' },  // #918 agent-published reports
     { id: 'schedules', label: 'Schedules' },
@@ -958,6 +967,31 @@ async function checkDashboardExists() {
   hasDashboard.value = false
 }
 
+// #58 — detect the per-agent Brain Orb capability from template.yaml's
+// `capabilities:` list (surfaced by GET /api/agents/{name}/info). Generalizable:
+// any agent declaring the `brain-orb` token qualifies — never a hardcoded name.
+async function checkBrainOrbCapability() {
+  if (!agent.value?.name || agent.value?.status !== 'running') {
+    hasBrainOrb.value = false
+    return
+  }
+  try {
+    const info = await agentsStore.getAgentInfo(agent.value.name)
+    const caps = Array.isArray(info?.capabilities) ? info.capabilities : []
+    hasBrainOrb.value = caps.includes('brain-orb')
+  } catch {
+    hasBrainOrb.value = false
+  }
+}
+
+// Selecting the Brain tab is a route hop, not an in-page panel: push to the
+// dedicated full-page orb. The component unmounts, so no stale activeTab to reset.
+watch(activeTab, (tab) => {
+  if (tab === 'brain' && agent.value?.name) {
+    router.push({ name: 'AgentBrainOrb', params: { name: agent.value.name } })
+  }
+})
+
 // Load auth status (subscription vs API key)
 async function loadAuthStatus() {
   if (!agent.value?.name) return
@@ -1130,7 +1164,7 @@ onMounted(async () => {
     loadAvailableSubscriptions(),
     sessionsStore.loadFeatureFlags(),  // SESSION_TAB_2026-04 Phase 3
     loadTokenStats(),
-    ...(agent.value?.status === 'running' ? [checkDashboardExists()] : [])
+    ...(agent.value?.status === 'running' ? [checkDashboardExists(), checkBrainOrbCapability()] : [])
   ])
   startEmotionCycling()
   startAllPolling()
@@ -1159,9 +1193,10 @@ onActivated(async () => {
   // Reload emotions and restart cycling (AVATAR-002)
   await loadAvailableEmotions()
   startEmotionCycling()
-  // Re-check for dashboard if agent is running
+  // Re-check for dashboard + brain-orb capability if agent is running
   if (agent.value?.status === 'running') {
     await checkDashboardExists()
+    await checkBrainOrbCapability()
   }
 
   // Handle tab query param (EXEC-023: Continue as Chat navigation)

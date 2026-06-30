@@ -248,6 +248,13 @@ GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-
 # also requires a per-agent voip_bindings row to function. `voip_available`
 # in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
+# Brain Orb (#58, trinity-enterprise) — capability-gated per-agent 3D knowledge
+# visualization. Default OFF. The static-render foundation has NO Gemini/voice
+# dependency, so the platform flag is the bare env var (the deferred voice
+# follow-up adds its own GEMINI_API_KEY gate). The per-agent half of the gate is
+# the `brain-orb` capability token in the agent's template.yaml, checked in the
+# frontend. `brain_orb_available` in GET /api/settings/feature-flags == this flag.
+BRAIN_ORB_ENABLED = os.getenv("BRAIN_ORB_ENABLED", "false").lower() == "true"
 # VoIP-specific max call duration (seconds) — deliberately distinct from the
 # inherited 300s VOICE_MAX_DURATION so phone calls aren't silently cut at 5min.
 VOIP_MAX_CALL_DURATION = int(os.getenv("VOIP_MAX_CALL_DURATION", "600"))

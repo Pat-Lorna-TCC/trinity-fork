@@ -135,6 +135,7 @@ async def get_public_feature_flags(
         GEMINI_API_KEY,
         VOICE_ENABLED,
         VOIP_ENABLED,
+        BRAIN_ORB_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
@@ -147,6 +148,10 @@ async def get_public_feature_flags(
         # VoIP telephony (VOIP-001, #1056) — default OFF, mirrors workspace_available.
         # Also requires a per-agent voip_bindings row to actually function.
         "voip_available": VOIP_ENABLED and bool(GEMINI_API_KEY),
+        # Brain Orb (#58, trinity-enterprise) — gates the per-agent /agents/:name/brain
+        # route + tab. Just the env flag (static render needs no Gemini); the per-agent
+        # capability gate is the template.yaml `brain-orb` token, checked frontend-side.
+        "brain_orb_available": BRAIN_ORB_ENABLED,
         # Pull-pilot routing for agent→agent MCP chat (#946) — default OFF.
         # Observability-only here: the routing gate is the MCP server's own read
         # of the same env var. Lets an operator confirm, via the API, whether the
