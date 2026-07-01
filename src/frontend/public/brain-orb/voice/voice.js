@@ -94,6 +94,8 @@
     if (!m || typeof m !== 'object') return;
     // Parent (orb.js) tells us to fully disconnect (voice tile toggled off with V).
     if (m.type === 'orb-voice-stop') { try { endConversation(); } catch (e) {} return; }
+    // Parent re-opened the tile → (re)start the conversation automatically.
+    if (m.type === 'orb-voice-start') { if (appState === 'IDLE' || appState === 'ERROR') startConversation(); return; }
     // Token relay reply.
     if (m.type === 'orb-voice-token' && _tokenWaiter) { _tokenWaiter(m); return; }
   });
@@ -481,6 +483,12 @@
       ctx.restore();
     }
     p.setup = function () {
+      // Cap to 1x device pixels: the smoke/core sketch is fill-bound (many radial
+      // gradients/frame). At retina 2x it costs ~4x and starves the main WebGL orb
+      // of frames → the big orb jerks. 1x is imperceptible on this small orb and
+      // frees the main render loop. (The original ran standalone with no such
+      // contention; inside the Trinity SPA + nested iframes it needs the headroom.)
+      p.pixelDensity(1);
       p.createCanvas(p.windowWidth, p.windowHeight);
       p.colorMode(p.HSB, 360, 100, 100, 100);
       for (var i=0;i<220;i++) particles.push(new Smoke(i));
@@ -523,6 +531,11 @@
     // Tell the parent we're loaded (it un-hides / positions the tile as needed).
     if (window.parent !== window) {
       try { window.parent.postMessage({ type: 'orb-voice-ready' }, '*'); } catch (e) {}
+      // #60: auto-start on load — opening the tile (via V) should begin the
+      // conversation, not require a manual Start click. The V keypress is the
+      // user gesture; if the mic is denied it falls to the ERROR state (Start
+      // button remains as a retry).
+      setTimeout(function () { if (appState === 'IDLE') startConversation(); }, 250);
     }
   }
 

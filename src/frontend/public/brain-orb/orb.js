@@ -1250,8 +1250,13 @@ addEventListener('message', async e=>{
 });
 function toggleVoice(){
   const t=$('voiceTile'); const open=t.classList.toggle('show');
-  if(open){ const f=$('voiceFrame'); if(!f.getAttribute('src')) f.setAttribute('src','./voice/orb.html?v='+Date.now());   // cache-bust so the latest voice tools/prompt always load
-    toast('voice on — pick a voice in the tile and press Start'); }
+  if(open){ const f=$('voiceFrame');
+    // #60: opening the tile AUTO-STARTS the conversation (no manual Start click).
+    // First open loads the page (which auto-starts on load); a re-open of an
+    // already-loaded (ended) tile re-starts via a message.
+    if(!f.getAttribute('src')) f.setAttribute('src','./voice/orb.html?v='+Date.now());
+    else { try{ f.contentWindow.postMessage({type:'orb-voice-start'}, '*'); }catch(_){} }
+    toast('voice on — starting…'); }
   else {
     pinned=false;
     // turning voice off must DISCONNECT (mic + Gemini Live socket), not just hide the tile
