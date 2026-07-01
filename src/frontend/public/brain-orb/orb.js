@@ -851,7 +851,11 @@ function frameNodes(indices){
 }
 function focusNode(i){
   const nd=NODES[i]; if(!nd) return;
-  frameNodes([i]); showInspector(i); setHover(i);      // #70 — fit the note, not a fixed 195
+  showInspector(i); setHover(i);       // light up the node + its neighbours + draw the connecting edges
+  // #70/#71 — frame the node TOGETHER WITH its connected neighbours (setHover's
+  // hoverSet), so a just-made link's other endpoint is on-screen — not a lone node
+  // zoomed in while its connection sits off-frame.
+  frameNodes(hoverSet && hoverSet.length ? hoverSet : [i]);
   pinned=true;                         // keep the selection lit; a stray mouse move must not wipe it
   const h=nodePoints.geometry.attributes.aHeat; h.array[i]=1.0; h.needsUpdate=true;
   setTimeout(()=>{ h.array[i]=nd.heat||0; h.needsUpdate=true; },1700);
@@ -1167,7 +1171,11 @@ const ORB_TOOLS={
   search_graph({query}){ return {matches: searchNodeIds(query,8).map(i=>NODES[i].title)}; },
   highlight_related_notes({topic}){ return highlightTopic(topic); },
   async navigate_to_note({title}){
-    const ids=searchNodeIds(title,1);
+    let ids=searchNodeIds(title,1);
+    // #71 — a just-created note may not be folded in yet (writes refresh on a debounce).
+    // If we miss AND an integration is pending, flush it now and retry before falling
+    // back to the vault — so "create X, now show me X" lands on the real graph node.
+    if(!ids.length && _refreshPending){ await refreshGraph('navigate-miss'); ids=searchNodeIds(title,1); }
     if(ids.length){ const i=ids[0]; focusNode(i);
       return {opened:true, in_view:true, title:NODES[i].title, layer:LAYER_NAME[NODES[i].layer],
               preview:(NODES[i].content||'').replace(/\s+/g,' ').trim().slice(0,300)}; }
@@ -1434,10 +1442,11 @@ async function setScope(tokens){
 // (or a manual refresh), ask the agent to fold new inbox notes/links into the graph,
 // then refetch /data and rebuild IN PLACE (same machinery as setScope). #68: a visible
 // "integrating…" state + a result toast so the user can confirm the write landed.
-let refreshBusy=false;
+let refreshBusy=false, _refreshTimer=null, _refreshPending=false;   // #67/#71 shared refresh state
 async function refreshGraph(reason){
   if(!VOICE_PROXY || !SCOPE_ENABLED) return {error:'no backend'};
   if(refreshBusy || scopeBusy) return {error:'busy'};
+  _refreshPending=false; clearTimeout(_refreshTimer);   // consume any pending debounced refresh
   refreshBusy=true; const ld=$('loading'); if(ld){ ld.textContent='integrating…'; ld.style.display=''; }
   try{ setState('ingesting'); }catch(_){ }
   try{
@@ -1512,8 +1521,9 @@ $('actClose')&&($('actClose').onclick=()=>toggleActions(false));
 $('refreshGraphBtn')&&($('refreshGraphBtn').onclick=()=>refreshGraph('manual'));
 // #67 — voice-created writes come in bursts; coalesce them into ONE rebuild a few
 // seconds after the last one so the orb isn't torn down mid-conversation per capture.
-let _refreshTimer=null;
-function scheduleRefresh(){ clearTimeout(_refreshTimer); _refreshTimer=setTimeout(()=>refreshGraph('voice'),4000); }
+// _refreshPending lets navigate_to_note flush the pending integration on a miss (#71).
+function scheduleRefresh(){ _refreshPending=true; clearTimeout(_refreshTimer);
+  _refreshTimer=setTimeout(()=>{ _refreshPending=false; refreshGraph('voice'); },4000); }
 
 /* --- capture a thought -> a note in 00-Inbox (the note lands now; it joins the graph at the next reindex) --- */
 // Re-entrancy guard: each postAction mints a fresh Idempotency-Key, so a double-click
