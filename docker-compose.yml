@@ -39,6 +39,9 @@ services:
       # Both default OFF; must reach the container or the flags stay false (config.py).
       - BRAIN_ORB_ENABLED=${BRAIN_ORB_ENABLED:-false}
       - BRAIN_ORB_VOICE_ENABLED=${BRAIN_ORB_VOICE_ENABLED:-false}
+      # KB-write surface (#61 Phase 4a) — owner-gated capture/link. Distinct kill-switch
+      # so writes disable without downing read/voice. Default OFF (config.py).
+      - BRAIN_ORB_WRITE_ENABLED=${BRAIN_ORB_WRITE_ENABLED:-false}
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Master switch must
       # reach the container or voip_available stays false (read by config.py).
       - VOIP_ENABLED=${VOIP_ENABLED:-false}

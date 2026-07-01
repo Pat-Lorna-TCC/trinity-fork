@@ -167,7 +167,7 @@ The data route uses standard `AuthorizedAgentByName` Bearer auth like every othe
 | Tab + capability | `src/frontend/src/views/AgentDetail.vue` (`visibleTabs`, `checkBrainOrbCapability`) |
 | Backend proxy | `src/backend/routers/agent_brain_orb.py` (data/scopes/scope + voice-token/tool + **actions/action** — Phase 4a) |
 | Mint service (Phase 3/4a) | `src/backend/services/brain_orb_voice_service.py` (v1alpha ephemeral token + locked tool manifest; **`can_write` → owner-only capture/link tools**) |
-| Flag (BE) | `src/backend/config.py` (`BRAIN_ORB_ENABLED`, `BRAIN_ORB_VOICE_ENABLED`, **`BRAIN_ORB_WRITE_ENABLED`**), `src/backend/routers/settings.py` |
+| Flag (BE) | `src/backend/config.py` (`BRAIN_ORB_ENABLED`, `BRAIN_ORB_VOICE_ENABLED`, **`BRAIN_ORB_WRITE_ENABLED`**), `src/backend/routers/settings.py`, **`docker-compose.yml`** (each flag must be in the backend `environment:` block to reach the container) |
 | Agent-server | `docker/base-image/agent_server/routers/brain_orb.py` (data/scopes/scope + search + **action** hook — Phase 4a) |
 | Flag (FE) | `src/frontend/src/stores/sessions.js` (`brainOrbAvailable`, `brainOrbVoiceAvailable`, **`brainOrbWriteAvailable`**) |
 | Tests | `tests/unit/test_brain_orb.py` |
