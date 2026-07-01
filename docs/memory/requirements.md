@@ -3418,11 +3418,12 @@ servers (each replica polls + reconciles independently).
 ## 46. Brain Orb — The Self-Rendering Mind (trinity-enterprise#58)
 
 **Description**: A capability-gated per-agent page that renders a Cornelius-class agent's live
-3D knowledge-graph orb from data the agent produces in its own container, with live scope control.
-**Shipped: static render (Phase 1, FR-1…5) + scope mount/unmount → re-export → live rebuild
-(Phase 2, FR-6).** Voice (Gemini Live), KB-write actions, transcript capture, and headless-skill
-injection remain deferred to later children of the tighter-Cornelius-integration epic. Default
-OFF — no impact on other agents or the UI. See [feature-flows/brain-orb.md](feature-flows/brain-orb.md).
+3D knowledge-graph orb from data the agent produces in its own container, with live scope control
+and a client-held voice tile. **Shipped: static render (Phase 1, FR-1…5) + scope mount/unmount →
+re-export → live rebuild (Phase 2, FR-6) + client-held Gemini Live voice tile + read-only KB search
+(Phase 3, FR-7).** KB-write actions, automatic transcript capture, and headless-skill injection
+remain deferred to later children of the tighter-Cornelius-integration epic. Default OFF — no impact
+on other agents or the UI. See [feature-flows/brain-orb.md](feature-flows/brain-orb.md).
 
 - **FR-1 — First-party CSP-clean assets**: the orb ships as verbatim first-party frontend assets
   (`public/brain-orb/`), with `three`/`marked`/`DOMPurify`/font vendored locally and the inline
@@ -3451,10 +3452,35 @@ OFF — no impact on other agents or the UI. See [feature-flows/brain-orb.md](fe
   them via hardened async subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards) and
   404s when absent. The agent owns scope state + the re-export (Invariant #8); Trinity only brokers.
   Replaces the local voice proxy's per-start `X-Orb-Token` with the platform JWT + owner gate.
+- **FR-7 — Client-held Gemini Live voice tile + read-only KB search (Phase 3, #60)**: the orb's voice
+  tile holds its own Gemini Live session **client-side** — the browser connects DIRECTLY to Gemini
+  Live (mic capture + playback in the same-origin iframe), Trinity never proxies the audio.
+  Deliberately distinct from Trinity's backend-proxied workspace voice (VOICE-001), to keep the
+  voice→tool→orb loop in-browser. **Ephemeral-credential broker**: `POST /api/agents/{name}/brain-orb/
+  voice-token` (`AuthorizedAgentByName`; per-(user,agent) rate-limited) mints a short-lived,
+  **config-locked** Gemini Live ephemeral token via `auth_tokens.create` (`live_connect_constraints`
+  pins model + the whole config incl. the tool surface; `uses=1`; ~60s new-session window; expiry =
+  `VOICE_MAX_DURATION`). Built with a dedicated **v1alpha** genai client (NOT the cached voice
+  singleton). The token is minted by the orb page (which holds the JWT) and relayed to the nested
+  voice iframe over `postMessage` — the JWT never enters the voice iframe or a URL; the voice iframe
+  only ever sees the single-use Google token. Response field is `ephemeral_token` (never `token`, which
+  would flip the deferred write surface on). **Visual-only tools** (`highlight_related_notes`,
+  `navigate_to_note`, `list_converged_topics`, …) run in-browser via the existing `orb-tool`
+  postMessage bridge. **Scope-by-voice reuses Phase 2** (`mount_scope`/`unmount_scope` → the FR-6
+  `/scope` broker — no new mutation surface). **Read-only KB search**: `POST /api/agents/{name}/
+  brain-orb/tool` (`AuthorizedAgentByName`) → agent-server runs the agent's `~/.trinity/brain-orb/
+  search` convention hook (scope-aware, read-only; 404 when absent). **Writes stay off by
+  construction**: the locked tool manifest declares only read/visual/scope tools; the browser cannot
+  widen it, and orb.js's `ACTIONS` write surface stays disabled (no `/session` route). **Gating**: a
+  new `brain_orb_voice_available` flag (`BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY`, default OFF) —
+  distinct from the static `brain_orb_available` — AND the agent's `brain-orb` capability. CSP-clean:
+  `connect-src` already allows `wss:`; the Gemini JS client is hand-rolled (no CDN), the voice logic
+  and mic worklet are externalized same-origin files (script-src 'self'); the p5 CDN visualiser and
+  the standalone page's hardcoded key are stripped. The outer host iframe carries `allow="microphone"`.
 
-**Deferred (epic children)**: client-held Gemini Live voice tile · KB write actions · automatic
-transcript-capture pipeline · headless skill injection · data-freshness/on-demand-refresh trigger ·
-`data.json` caching/streaming.
+**Deferred (epic children)**: KB write actions (capture/link/run-skill) · automatic transcript-capture
+pipeline · headless skill injection · data-freshness/on-demand-refresh trigger · `data.json`
+caching/streaming.
 
 ---
 

@@ -71,7 +71,7 @@
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
 - `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
 - `agent_data.py` - Runtime-data export/import (`data_paths`) over the durable home volume (#1169)
-- `agent_brain_orb.py` - Brain Orb proxy: `/brain-orb/data` + `/scopes` (read) + `/scope` (owner mutation) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58)
+- `agent_brain_orb.py` - Brain Orb proxy: `/brain-orb/data` + `/scopes` + `/tool` (read) + `/scope` (owner mutation) + `/voice-token` (Phase 3 ephemeral Gemini mint) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58, #60)
 - `loops.py` - Sequential agent loops: start/get/stop + agent-scoped list (#740)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
@@ -289,7 +289,7 @@ Vector 0.43.1 (`timberio/vector:0.43.1-alpine`). Captures all container stdout/s
 - `/api/credentials/reload-token` - Surgical subscription-token hot-reload (#1089): mutates the agent-server process `os.environ["CLAUDE_CODE_OAUTH_TOKEN"]` so the NEXT claude subprocess uses the rotated token while in-flight subprocesses keep theirs; persists to the writable-layer override `/var/lib/trinity/oauth-token` (0600). Does NOT touch `.env`/`.mcp.json`. See [Subscription Token Rotation](#subscription-token-rotation-via-hot-reload-1089)
 - `/api/chat/session` - Context window stats
 - `/api/files`, `/api/files/download` (100MB limit), `/api/files/mkdir` (workspace-confined, #37)
-- `/api/brain-orb/data` - Streams the agent's `resources/agent-visualization/data.json` (Brain Orb read surface, #58); 404 when absent. `/api/brain-orb/scopes` + `/api/brain-orb/scope` run the agent's `~/.trinity/brain-orb/{scopes,scope}` convention hooks for live scope control (#58 Phase 2)
+- `/api/brain-orb/data` - Streams the agent's `resources/agent-visualization/data.json` (Brain Orb read surface, #58); 404 when absent. `/api/brain-orb/scopes` + `/api/brain-orb/scope` run the agent's `~/.trinity/brain-orb/{scopes,scope}` convention hooks for live scope control (#58 Phase 2); `/api/brain-orb/tool` runs the read-only `~/.trinity/brain-orb/search` hook (#60 Phase 3)
 
 The agent server also runs two loops: the 15-min git `auto_sync` heartbeat (see [Git Sync Health](#git-sync-health-389390)) and the 5s liveness heartbeat (see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307)).
 
@@ -615,14 +615,16 @@ never bypassed.
 ### Brain Orb — Self-Rendering Mind page (#58, trinity-enterprise)
 
 Capability-gated per-agent 3D knowledge-graph page for Cornelius-class agents.
-**Shipped: static render (Phase 1) + live scope control (Phase 2).** The orb
-renders the agent-produced graph and supports button-driven **scope mount/unmount
-→ agent re-export → live rebuild**. Still deferred to later epic children:
-client-held Gemini Live **voice**, KB-write actions, transcript capture, and
-headless-skill injection. Mirrors the workspace page (gated per-agent route) and
-the agent-owned read-surface pattern (pipelines #919, reports #918): the agent
-owns generation + scope state (Invariant #8), Trinity reads/renders + brokers
-control. Default OFF — no impact on other agents.
+**Shipped: static render (Phase 1) + live scope control (Phase 2) + client-held
+Gemini Live voice tile + read-only KB search (Phase 3, #60).** The orb renders the
+agent-produced graph, supports button-driven **scope mount/unmount → agent
+re-export → live rebuild**, and a **client-held voice tile** (browser connects
+directly to Gemini Live via a short-lived, config-locked ephemeral token minted by
+Trinity — no audio proxying). Still deferred to later epic children: KB-write
+actions, transcript capture, and headless-skill injection. Mirrors the workspace
+page (gated per-agent route) and the agent-owned read-surface pattern (pipelines
+#919, reports #918): the agent owns generation + scope state (Invariant #8),
+Trinity reads/renders + brokers control. Default OFF — no impact on other agents.
 
 - **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
   page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/
@@ -645,22 +647,40 @@ control. Default OFF — no impact on other agents.
   idiom). Selecting the tab route-pushes to the page.
 - **Backend proxy** (`routers/agent_brain_orb.py`, prefix `/api/agents/{name}/brain-orb/*`):
   one shared gate/proxy helper (flag → running → `agent_httpx_client` #1159, **byte
-  pass-through**, 404/503/504/502 mapping). `GET /data` + `GET /scopes` are read
-  (`AuthorizedAgentByName`); **`POST /scope` is the only mutating route and is
-  `OwnedAgentByName`** (owner/admin) — body-capped 64 KB, 200s timeout above the
-  agent hook's 180s.
+  pass-through**, 404/503/504/502 mapping). `GET /data` + `GET /scopes` + `POST /tool`
+  (read-only KB search) are read (`AuthorizedAgentByName`); **`POST /scope` is the only
+  mutating route and is `OwnedAgentByName`** (owner/admin) — body-capped 64 KB, 200s
+  timeout above the agent hook's 180s. `POST /voice-token` (Phase 3, `AuthorizedAgentByName`,
+  per-(user,agent) rate-limited) mints the ephemeral Gemini Live credential (does NOT
+  contact the agent — a Google call, not an agent call).
+- **Voice-token mint** (`services/brain_orb_voice_service.py`, Phase 3, #60): the client-held
+  voice tile connects the browser DIRECTLY to Gemini Live. `mint_voice_token()` builds its
+  **own v1alpha `genai.Client`** (NOT the cached `gemini_voice` singleton, which lacks
+  v1alpha and would reject the ephemeral mint) and calls `auth_tokens.create` with
+  `live_connect_constraints` locking the model + the whole `LiveConnectConfig` (system
+  prompt + voice + the **read/visual/scope-only tool manifest** — no write tools), `uses=1`,
+  a ~60s new-session window, and `expire_time = VOICE_MAX_DURATION`. The token's constraints
+  ARE the security envelope (no Redis ticket needed — the browser talks to Google, not
+  Trinity). Response field is `ephemeral_token` (never `token`, which would flip orb.js's
+  deferred write surface on). The orb page (which holds the JWT) mints and relays only the
+  Google token to the nested voice iframe over `postMessage`. Writes stay off by
+  construction: locked manifest + no `/session` route.
 - **Agent-server mirror** (`agent_server/routers/brain_orb.py`): `GET /api/brain-orb/data`
   streams the fixed-path `~/resources/agent-visualization/data.json` via `FileResponse`.
-  Scope control runs **agent convention hooks** (mirrors `~/.trinity/pre-check`, #454):
+  Scope + search run **agent convention hooks** (mirrors `~/.trinity/pre-check`, #454):
   `GET /api/brain-orb/scopes` runs `~/.trinity/brain-orb/scopes`; `POST /api/brain-orb/scope`
-  pipes the request body to `~/.trinity/brain-orb/scope` (which mutates the active set,
-  re-runs the agent's exporter → rewrites `data.json`, prints the new state). Both via
-  hardened async subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards);
-  **404 when the hook is absent** (agent doesn't support scope control). Trinity never runs
-  `export_data.py` itself — the agent owns generation + scope state (Invariant #8).
-- Platform flag `brain_orb_available = BRAIN_ORB_ENABLED` (env, default OFF — no Gemini
-  dependency; the deferred voice child adds its own gate). No DB change, no migration, no
-  new secret.
+  pipes the body to `~/.trinity/brain-orb/scope` (mutate active set, re-export → rewrite
+  `data.json`, print new state); `POST /api/brain-orb/tool` pipes a query to the read-only
+  `~/.trinity/brain-orb/search` hook (scope-aware, no writes). All via hardened async
+  subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards); **404 when the
+  hook is absent**. Trinity never runs `export_data.py` itself — the agent owns generation +
+  scope state (Invariant #8).
+- Platform flags: `brain_orb_available = BRAIN_ORB_ENABLED` (env, default OFF — static
+  render, no Gemini dependency); **`brain_orb_voice_available = BRAIN_ORB_VOICE_ENABLED &&
+  GEMINI_API_KEY`** (default OFF — Phase 3 voice tile, distinct because voice needs a Gemini
+  key). Voice frontend assets are CSP-clean (hand-rolled Gemini client, externalized
+  `voice/voice.js`, same-origin `voice/mic-worklet.js`; `connect-src` already allows `wss:`).
+  No DB change, no migration, no new secret.
 
 ---
 
@@ -717,6 +737,8 @@ control. Default OFF — no impact on other agents.
 | GET | `/api/agents/{name}/brain-orb/data` | Read-only proxy of the agent's Brain Orb `data.json` (`AuthorizedAgentByName`; byte pass-through; 404 when flag off / no export, 503/504 unreachable, 502 agent error). See [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58) |
 | GET | `/api/agents/{name}/brain-orb/scopes` | List the agent's selectable + active vault scopes for the orb scope panel (`AuthorizedAgentByName`; 404 when unsupported). (#58 Phase 2) |
 | POST | `/api/agents/{name}/brain-orb/scope` | Mutate the active scope set → agent re-export (**`OwnedAgentByName`** — owner/admin; body-capped; 404 when unsupported). (#58 Phase 2) |
+| POST | `/api/agents/{name}/brain-orb/voice-token` | Mint a short-lived, config-locked Gemini Live **ephemeral token** for the client-held voice tile (`AuthorizedAgentByName`; per-(user,agent) rate-limited; 404 when `BRAIN_ORB_VOICE_ENABLED` off, 503 no key, 502 mint error). Response field `ephemeral_token`. (#60 Phase 3) |
+| POST | `/api/agents/{name}/brain-orb/tool` | Read-only KB search — proxies to the agent's `~/.trinity/brain-orb/search` hook (`AuthorizedAgentByName`; 404 when unsupported). (#60 Phase 3) |
 | GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
 | POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
 | GET | `/api/agents/{name}/mcp-exposed` | MCP-exposure flag + the deterministic `tool_name` the MCP server would register. See [MCP Exposure](#mcp-exposure--dedicated-dynamic-tools-846) (#846) |
@@ -914,7 +936,7 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/settings/mcp-url` | Get (any auth user) / set / reset-to-auto-detect (admin-only) MCP server URL |
-| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (`BRAIN_ORB_ENABLED`, default OFF; gates the Brain Orb page — #58), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
+| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (`BRAIN_ORB_ENABLED`, default OFF; gates the Brain Orb page — #58), `brain_orb_voice_available` (`BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY`, default OFF; gates the client-held voice tile — #60), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
 | GET/PUT | `/api/settings/agent-defaults/resources` | Fleet-wide default CPU/memory for new containers (admin-only; CPU 1/2/4/8/16, memory 1g–32g) (RES-001) |
 | GET/PUT | `/api/settings/agent-defaults/access-policy` | Fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON** (code fallback when unset — no migration); seeds `agent_ownership.require_email` at creation (`register_agent_owner`) for **new** agents only, never rewrites existing rows; owners still override per agent via `PUT /api/agents/{name}/access-policy` |
 | GET/PUT | `/api/settings/max-parallel-tasks-ceiling` | Fleet-wide ceiling on per-agent `max_parallel_tasks` (admin-only, #506). Returns `{value, default, min, max}`; PUT range-validated 1–32 (400 otherwise), audit-logged. Stored in `system_settings` (no migration). The generic catch-all `PUT /{key}` is blocked for this key (422 → dedicated route). Clamp is runtime/clamp-on-use — see [Capacity & Backlog](#capacity--backlog-428) |

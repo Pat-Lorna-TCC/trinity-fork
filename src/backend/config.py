@@ -255,6 +255,13 @@ VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
 # the `brain-orb` capability token in the agent's template.yaml, checked in the
 # frontend. `brain_orb_available` in GET /api/settings/feature-flags == this flag.
 BRAIN_ORB_ENABLED = os.getenv("BRAIN_ORB_ENABLED", "false").lower() == "true"
+# Brain Orb voice tile (#58 Phase 3, trinity-enterprise#60) — the client-held
+# Gemini Live voice surface. DISTINCT from BRAIN_ORB_ENABLED (which gates the
+# static render + scope control, no Gemini dependency): the voice tile also needs
+# a Gemini key, so `brain_orb_voice_available` = BRAIN_ORB_VOICE_ENABLED and
+# bool(GEMINI_API_KEY) (mirrors voice_available). Default OFF. The frontend hides
+# the voice tile unless this is on AND the agent has the `brain-orb` capability.
+BRAIN_ORB_VOICE_ENABLED = os.getenv("BRAIN_ORB_VOICE_ENABLED", "false").lower() == "true"
 # VoIP-specific max call duration (seconds) — deliberately distinct from the
 # inherited 300s VOICE_MAX_DURATION so phone calls aren't silently cut at 5min.
 VOIP_MAX_CALL_DURATION = int(os.getenv("VOIP_MAX_CALL_DURATION", "600"))

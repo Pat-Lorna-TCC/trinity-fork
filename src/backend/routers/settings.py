@@ -136,6 +136,7 @@ async def get_public_feature_flags(
         VOICE_ENABLED,
         VOIP_ENABLED,
         BRAIN_ORB_ENABLED,
+        BRAIN_ORB_VOICE_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
@@ -152,6 +153,12 @@ async def get_public_feature_flags(
         # route + tab. Just the env flag (static render needs no Gemini); the per-agent
         # capability gate is the template.yaml `brain-orb` token, checked frontend-side.
         "brain_orb_available": BRAIN_ORB_ENABLED,
+        # Brain Orb voice tile (#58 Phase 3, trinity-enterprise#60) — client-held
+        # Gemini Live. DISTINCT from brain_orb_available: the voice tile also needs a
+        # Gemini key, so gate on BRAIN_ORB_VOICE_ENABLED AND a key (mirrors
+        # voice_available). The frontend un-hides the voice tile only when this is on
+        # AND the agent carries the `brain-orb` capability. Default OFF.
+        "brain_orb_voice_available": BRAIN_ORB_VOICE_ENABLED and bool(GEMINI_API_KEY),
         # Pull-pilot routing for agent→agent MCP chat (#946) — default OFF.
         # Observability-only here: the routing gate is the MCP server's own read
         # of the same env var. Lets an operator confirm, via the API, whether the

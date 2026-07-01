@@ -14,20 +14,32 @@ control loop: list scopes (read) and mutate the active set → agent re-export
 (owner-gated). Isolated in its own router (no edits to agent_files.py). The 5-
 segment paths never collide with the ``/api/agents/{name}`` catch-all (Inv #4).
 """
+import json
+import logging
+
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from config import BRAIN_ORB_ENABLED
-from dependencies import AuthorizedAgentByName, OwnedAgentByName
+from config import BRAIN_ORB_ENABLED, BRAIN_ORB_VOICE_ENABLED, GEMINI_API_KEY
+from database import db
+from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName
+from services import brain_orb_voice_service, rate_limiter
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["brain-orb"])
 
 _AGENT_PORT = 8000
 _MAX_SCOPE_BODY = 64 * 1024
+_MAX_TOOL_BODY = 16 * 1024        # read-tool requests are tiny (a query + scope)
 _NO_STORE = {"Cache-Control": "no-store"}
+# Per-(user, agent) voice-token mint budget — a leaked JWT can't spin up unbounded
+# Gemini Live sessions on the platform key. Mirrors the VoIP spend-control precedent.
+_VOICE_TOKEN_RATE_LIMIT = 10
+_VOICE_TOKEN_RATE_WINDOW = 60
 
 
 async def _agent_request(agent_name: str, method: str, path: str, *, content: bytes | None = None, timeout: float) -> httpx.Response:
@@ -97,3 +109,63 @@ async def post_brain_orb_scope(agent_name: OwnedAgentByName, request: Request):
         raise HTTPException(status_code=413, detail="Request too large")
     response = await _agent_request(agent_name, "POST", "/api/brain-orb/scope", content=body, timeout=200.0)
     return _passthrough(response, not_found="Scope control not supported")
+
+
+@router.post("/{agent_name}/brain-orb/voice-token")
+async def post_brain_orb_voice_token(agent_name: AuthorizedAgentByName, current_user: CurrentUser):
+    """Mint a short-lived, config-locked Gemini Live **ephemeral token** for the
+    orb's client-held voice tile (#58 Phase 3).
+
+    The browser connects DIRECTLY to Gemini Live with this token — Trinity never
+    proxies the audio. The token's own constraints (model lock, locked tool
+    surface, single new-session use, short expiry) are the security envelope; this
+    route's job is the JWT gate + a per-user mint budget.
+
+    Gated on the **voice** flag (distinct from ``BRAIN_ORB_ENABLED``): 404 when
+    ``BRAIN_ORB_VOICE_ENABLED`` is off, 503 when no Gemini key, 502 on mint error.
+
+    The response field is deliberately **not** named ``token`` — orb.js's
+    ``initActions()`` reads ``.token`` from the (deferred) Phase-4 write surface,
+    and a ``token`` here would silently enable KB writes (review F1). The agent is
+    not contacted (no container check) — the mint is a Google call, not an agent call.
+    """
+    if not BRAIN_ORB_VOICE_ENABLED:
+        raise HTTPException(status_code=404, detail="Brain Orb voice is not enabled")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=503, detail="Voice is not configured")
+    rate_limiter.enforce(
+        f"brain_orb_voice_token:{current_user.id}:{agent_name}",
+        _VOICE_TOKEN_RATE_LIMIT,
+        _VOICE_TOKEN_RATE_WINDOW,
+        detail="Too many voice sessions.",
+    )
+    try:
+        result = await brain_orb_voice_service.mint_voice_token(
+            agent_name,
+            voice_name=db.get_voice_name(agent_name),
+            agent_prompt=db.get_voice_system_prompt(agent_name),
+        )
+    except ValueError:
+        # No Gemini key surfaced from the service layer — treat as unconfigured.
+        raise HTTPException(status_code=503, detail="Voice is not configured")
+    except Exception as exc:  # SDK / network / quota — never leak internals.
+        logger.warning("brain-orb voice-token mint failed for %s: %s", agent_name, exc)
+        raise HTTPException(status_code=502, detail="Could not mint a voice session")
+    return Response(
+        content=json.dumps(result),
+        media_type="application/json",
+        headers=_NO_STORE,
+    )
+
+
+@router.post("/{agent_name}/brain-orb/tool")
+async def post_brain_orb_tool(agent_name: AuthorizedAgentByName, request: Request):
+    """Read-only KB-search broker (#58 Phase 3). Proxies to the agent-server, which
+    runs the agent's ``~/.trinity/brain-orb/search`` convention hook (scope-aware,
+    read-only). Read access (``AuthorizedAgentByName``) — search never writes. 404
+    when the agent ships no ``search`` hook."""
+    body = await request.body()
+    if len(body) > _MAX_TOOL_BODY:
+        raise HTTPException(status_code=413, detail="Request too large")
+    response = await _agent_request(agent_name, "POST", "/api/brain-orb/tool", content=body, timeout=30.0)
+    return _passthrough(response, not_found="KB search not supported")

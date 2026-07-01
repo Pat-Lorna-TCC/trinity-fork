@@ -20,20 +20,27 @@
   src: url('./vendor/fonts/jetbrains-mono-500.woff2') format('woff2');
 }
 
-/* Deferred (voice / KB-action) surfaces — hidden via !important so renderer
- * toggles (V / A keys, dock chips) can't reveal a non-functional panel.
+/* Deferred (KB-action) surfaces — hidden via !important so renderer toggles
+ * (A key, dock chips) can't reveal a non-functional panel. KB WRITES are Phase 4.
  * #58 Phase 2: the scope panel (S) IS enabled (live mount/unmount → re-export),
  * so it is intentionally NOT hidden. */
-#voiceTile,
 #actions,
 #inspActions {
   display: none !important;
 }
 
+/* #60 Phase 3: the client-held voice tile (V) is enabled ONLY when the host set
+ * body.brain-orb-voice (platform flag + agent capability). Without it the tile
+ * stays hidden so the V key / dock chip can't reveal a non-functional panel. */
+body:not(.brain-orb-voice) #voiceTile {
+  display: none !important;
+}
+
 /* Matching keyboard-hint rows in the controls legend: voice(2) / actions(11).
- * scope(8) stays visible now that scope control is live.
- * Markup is frozen (verbatim orb), so positional selectors are stable. */
-#controls > div:nth-child(2),
+ * scope(8) stays visible now that scope control is live. The voice hint follows
+ * the same gate as the tile. Markup is frozen (verbatim orb), so positional
+ * selectors are stable. */
+body:not(.brain-orb-voice) #controls > div:nth-child(2),
 #controls > div:nth-child(11) {
   display: none !important;
 }

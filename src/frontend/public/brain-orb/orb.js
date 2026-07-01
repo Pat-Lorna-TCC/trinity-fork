@@ -24,7 +24,7 @@ const TRINITY_EMBED = (() => {
     window.addEventListener('message', e => {
       if (e.origin !== window.location.origin) return;        // same-origin only
       const d = e.data; if (!d || d.type !== 'brain-orb:init') return;
-      finish({ agentName: d.agentName, apiBase: d.apiBase || '', authToken: d.authToken || '' });
+      finish({ agentName: d.agentName, apiBase: d.apiBase || '', authToken: d.authToken || '', voiceAvailable: !!d.voiceAvailable });
     });
     try { window.parent.postMessage({ type: 'brain-orb:ready' }, window.location.origin); } catch (_) {}
     setTimeout(() => finish(null), 8000);                     // don't hang if no host answers
@@ -37,6 +37,7 @@ const TRINITY_EMBED = (() => {
 // scope control is available. Empty/false standalone (relative-path fallbacks).
 let ORB_HEADERS = {};
 let SCOPE_ENABLED = false;
+let VOICE_AVAILABLE = false;   // #60 Phase 3 — gates the client-held voice tile
 
 async function loadData(){
   if (window.AGENT_DATA) return window.AGENT_DATA;          // file:// safe
@@ -47,6 +48,9 @@ async function loadData(){
     VOICE_PROXY = (ctx.apiBase || '') + '/api/agents/' + encodeURIComponent(ctx.agentName) + '/brain-orb';
     ORB_HEADERS = ctx.authToken ? { Authorization: 'Bearer ' + ctx.authToken } : {};
     SCOPE_ENABLED = true;
+    // #60 Phase 3: un-hide the voice tile only when the host says voice is available
+    // (platform flag + agent capability). orb-trinity.css keeps it hidden otherwise.
+    if (ctx.voiceAvailable) { VOICE_AVAILABLE = true; try { document.body.classList.add('brain-orb-voice'); } catch(_){} }
     const r = await fetch(VOICE_PROXY + '/data', { headers: ORB_HEADERS });
     if (!r.ok) throw new Error('brain-orb data ' + r.status);
     return await r.json();
@@ -1131,14 +1135,20 @@ const ORB_TOOLS={
     if(ids.length){ const i=ids[0]; focusNode(i);
       return {opened:true, in_view:true, title:NODES[i].title, layer:LAYER_NAME[NODES[i].layer],
               preview:(NODES[i].content||'').replace(/\s+/g,' ').trim().slice(0,300)}; }
-    // not among the loaded nodes — fetch the note from the whole vault and show its content
+    // not among the loaded nodes — search the whole vault via the read-only KB
+    // broker (#60 Phase 3: POST /tool → the agent's ~/.trinity/brain-orb/search
+    // hook, scope-aware, read-only). The hook returns a note or a results list.
     try{
-      const r=await fetch(VOICE_PROXY+'/note?title='+encodeURIComponent(title), {signal:AbortSignal.timeout(6000)});
+      const r=await fetch(VOICE_PROXY+'/tool', {method:'POST',
+        headers:{'Content-Type':'application/json',...ORB_HEADERS},
+        body:JSON.stringify({query:title, limit:1}), signal:AbortSignal.timeout(8000)});
+      if(!r.ok) return {opened:false, error:'no note matching "'+title+'" found in the vault'};
       const d=await r.json();
-      if(d.error||!d.content) return {opened:false, error:'no note matching "'+title+'" found in the vault'};
-      showDetachedNote(d.title, d.content); toast('voice · opened "'+d.title.slice(0,40)+'"');
-      return {opened:true, in_view:false, title:d.title,
-              preview:d.content.replace(/\s+/g,' ').trim().slice(0,300)};
+      const hit = (d.results && d.results[0]) || d;   // accept {results:[…]} or a bare note
+      if(!hit || !hit.content) return {opened:false, error:'no note matching "'+title+'" found in the vault'};
+      showDetachedNote(hit.title||title, hit.content); toast('voice · opened "'+(hit.title||title).slice(0,40)+'"');
+      return {opened:true, in_view:false, title:hit.title||title,
+              preview:hit.content.replace(/\s+/g,' ').trim().slice(0,300)};
     }catch(e){ return {opened:false, error:'could not load the note ('+(e.message||e)+')'}; }
   },
   // authoritative enumeration of the agent's converged conclusions — the voice must
@@ -1222,6 +1232,21 @@ addEventListener('message', e=>{
   catch(err){ out={error:String(err&&err.message||err)}; }
   if(VOICE_DISPLAY_TOOLS.has(m.name)) pinned=true;   // hold it until the user takes over
   Promise.resolve(out).then(o=>{ try{ e.source.postMessage({type:'orb-tool-result', id:m.id, output:o}, '*'); }catch(_){ } });
+});
+// #60 Phase 3 — the voice tile (a nested iframe) never holds the platform JWT.
+// It asks US to mint a short-lived Gemini ephemeral token via the JWT-gated broker,
+// and we relay just the token back. The JWT stays in this page; the voice iframe
+// only ever sees the single-use, model-locked Google token (safe for the browser).
+addEventListener('message', async e=>{
+  if(e.origin!==window.location.origin) return;   // same-origin voice iframe only
+  const m=e.data; if(!m || m.type!=='orb-voice-token-request' || !e.source) return;
+  if(!VOICE_PROXY){ try{ e.source.postMessage({type:'orb-voice-token', ok:false, error:'voice not available'}, '*'); }catch(_){ } return; }
+  try{
+    const r=await fetch(VOICE_PROXY+'/voice-token', {method:'POST', headers:{...ORB_HEADERS}, signal:AbortSignal.timeout(12000)});
+    if(!r.ok){ e.source.postMessage({type:'orb-voice-token', ok:false, error:'mint failed ('+r.status+')'}, '*'); return; }
+    const d=await r.json();
+    e.source.postMessage({type:'orb-voice-token', ok:true, token:d.ephemeral_token, model:d.model, voiceName:d.voice_name, expiresAt:d.expires_at}, '*');
+  }catch(err){ try{ e.source.postMessage({type:'orb-voice-token', ok:false, error:String(err&&err.message||err)}, '*'); }catch(_){ } }
 });
 function toggleVoice(){
   const t=$('voiceTile'); const open=t.classList.toggle('show');

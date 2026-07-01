@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import routers.agent_brain_orb as bo
-from dependencies import get_authorized_agent_by_name, get_owned_agent_by_name
+from dependencies import get_authorized_agent_by_name, get_current_user, get_owned_agent_by_name
 
 _AGENT = "cornelius"
 
@@ -78,8 +78,11 @@ def client(monkeypatch):
     # Read routes use AuthorizedAgentByName; the mutating /scope uses OwnedAgentByName.
     app.dependency_overrides[get_authorized_agent_by_name] = lambda: _AGENT
     app.dependency_overrides[get_owned_agent_by_name] = lambda: _AGENT
-    # Flag ON by default; individual tests flip it off. container_reload is async.
+    app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(id=7, email="u@example.com")
+    # Flags ON by default; individual tests flip them off. container_reload is async.
     monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", True)
+    monkeypatch.setattr(bo, "BRAIN_ORB_VOICE_ENABLED", True)   # #60 Phase 3
+    monkeypatch.setattr(bo, "GEMINI_API_KEY", "test-key")      # #60 Phase 3
     monkeypatch.setattr(bo, "container_reload", AsyncMock())
     return TestClient(app, raise_server_exceptions=True)
 
@@ -223,6 +226,119 @@ def test_scope_post_unsupported_maps_to_404(client):
     assert r.status_code == 404
 
 
+# --- backend proxy: voice-token mint (#60 Phase 3) -------------------------
+
+_VOICE_TOKEN_URL = f"/api/agents/{_AGENT}/brain-orb/voice-token"
+
+
+def test_voice_token_success(client):
+    """Happy path: mints via the service, passes the body through no-store, and the
+    token field is NOT named `token` (would flip orb.js's Phase-4 write surface on)."""
+    minted = {
+        "ephemeral_token": "auth_tokens/abc123",
+        "model": "models/gemini-3.1-flash-live-preview",
+        "voice_name": "Kore",
+        "expires_at": "2026-07-01T00:05:00+00:00",
+        "tools": ["highlight_related_notes", "mount_scope"],
+    }
+    with patch.object(bo.db, "get_voice_name", return_value="Kore"), patch.object(
+        bo.db, "get_voice_system_prompt", return_value=None
+    ), patch.object(bo.rate_limiter, "enforce") as enforce, patch.object(
+        bo.brain_orb_voice_service, "mint_voice_token", AsyncMock(return_value=minted)
+    ):
+        r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ephemeral_token"] == "auth_tokens/abc123"
+    assert "token" not in body  # F1: never a bare `token` field
+    assert body["tools"] == ["highlight_related_notes", "mount_scope"]
+    assert r.headers.get("cache-control") == "no-store"
+    enforce.assert_called_once()  # per-(user,agent) mint budget is enforced
+
+
+def test_voice_token_flag_off_404(client, monkeypatch):
+    """Gated on the VOICE flag specifically — distinct from BRAIN_ORB_ENABLED."""
+    monkeypatch.setattr(bo, "BRAIN_ORB_VOICE_ENABLED", False)
+    r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 404
+
+
+def test_voice_token_no_key_503(client, monkeypatch):
+    monkeypatch.setattr(bo, "GEMINI_API_KEY", "")
+    r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 503
+
+
+def test_voice_token_mint_failure_502(client):
+    with patch.object(bo.db, "get_voice_name", return_value="Kore"), patch.object(
+        bo.db, "get_voice_system_prompt", return_value=None
+    ), patch.object(bo.rate_limiter, "enforce"), patch.object(
+        bo.brain_orb_voice_service, "mint_voice_token", AsyncMock(side_effect=RuntimeError("gemini boom"))
+    ):
+        r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 502
+
+
+def test_voice_token_value_error_maps_503(client):
+    """Service raising ValueError (no key surfaced late) → 503, never a 500."""
+    with patch.object(bo.db, "get_voice_name", return_value="Kore"), patch.object(
+        bo.db, "get_voice_system_prompt", return_value=None
+    ), patch.object(bo.rate_limiter, "enforce"), patch.object(
+        bo.brain_orb_voice_service, "mint_voice_token", AsyncMock(side_effect=ValueError("no key"))
+    ):
+        r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 503
+
+
+def test_voice_token_rate_limited_429(client):
+    """Over the per-user mint budget → 429 (enforce raises), before any mint."""
+    from fastapi import HTTPException as _HE
+    mint = AsyncMock()
+    with patch.object(bo.db, "get_voice_name", return_value="Kore"), patch.object(
+        bo.db, "get_voice_system_prompt", return_value=None
+    ), patch.object(bo.rate_limiter, "enforce", side_effect=_HE(status_code=429, detail="slow down")), patch.object(
+        bo.brain_orb_voice_service, "mint_voice_token", mint
+    ):
+        r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 429
+    mint.assert_not_called()  # rate gate fires before the mint
+
+
+# --- backend proxy: read-only /tool search broker (#60 Phase 3) ------------
+
+_TOOL_URL = f"/api/agents/{_AGENT}/brain-orb/tool"
+
+
+def test_tool_success_passes_through(client):
+    payload = b'{"results":[{"title":"Dopamine","content":"..."}]}'
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(200, payload))
+    ):
+        r = client.post(_TOOL_URL, json={"query": "dopamine"})
+    assert r.status_code == 200
+    assert r.json()["results"][0]["title"] == "Dopamine"
+
+
+def test_tool_unsupported_maps_to_404(client):
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(404))
+    ):
+        r = client.post(_TOOL_URL, json={"query": "x"})
+    assert r.status_code == 404
+
+
+def test_tool_flag_off_404(client, monkeypatch):
+    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    with patch.object(bo, "get_agent_container", return_value=_running()):
+        r = client.post(_TOOL_URL, json={"query": "x"})
+    assert r.status_code == 404
+
+
+def test_tool_body_too_large_413(client):
+    r = client.post(_TOOL_URL, json={"query": "x" * 20_000})
+    assert r.status_code == 413
+
+
 # --- agent-server routes: data read + scope hooks --------------------------
 
 def _write_hook(path, script: str):
@@ -239,6 +355,7 @@ def agent_env(tmp_path, monkeypatch):
     monkeypatch.setattr(asbo, "DATA_PATH", tmp_path / "data.json")
     monkeypatch.setattr(asbo, "_SCOPES_HOOK", hooks / "scopes")
     monkeypatch.setattr(asbo, "_SCOPE_HOOK", hooks / "scope")
+    monkeypatch.setattr(asbo, "_SEARCH_HOOK", hooks / "search")   # #60 Phase 3
     monkeypatch.setattr(asbo, "_HOME", tmp_path)   # subprocess cwd must exist on the test host
     app = FastAPI()
     app.include_router(asbo.router)
@@ -247,6 +364,7 @@ def agent_env(tmp_path, monkeypatch):
     return types.SimpleNamespace(
         client=TestClient(app), asbo=asbo, data=tmp_path / "data.json",
         scopes_hook=hooks / "scopes", scope_hook=hooks / "scope",
+        search_hook=hooks / "search",
     )
 
 
@@ -309,3 +427,73 @@ def test_run_hook_timeout_504(agent_env):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(agent_env.asbo._run_hook(agent_env.scope_hook, timeout=0.5))
     assert ei.value.status_code == 504
+
+
+# --- agent-server: read-only search hook (#60 Phase 3) ---------------------
+
+def test_agent_server_search_forwards_stdin(agent_env):
+    # Echoes the received query back, proving the read-only search hook forwards.
+    _write_hook(agent_env.search_hook,
+                '#!/bin/sh\nbody=$(cat)\necho "{\\"results\\":[],\\"query_received\\":$body}"\n')
+    r = agent_env.client.post("/api/brain-orb/tool", json={"query": "dopamine"})
+    assert r.status_code == 200
+    out = r.json()
+    assert out["query_received"] == {"query": "dopamine"}
+
+
+def test_agent_server_search_absent_404(agent_env):
+    r = agent_env.client.post("/api/brain-orb/tool", json={"query": "x"})
+    assert r.status_code == 404
+
+
+def test_agent_server_search_invalid_json_502(agent_env):
+    _write_hook(agent_env.search_hook, '#!/bin/sh\necho "not json"\n')
+    r = agent_env.client.post("/api/brain-orb/tool", json={"query": "x"})
+    assert r.status_code == 502
+
+
+def test_agent_server_search_nonzero_exit_502(agent_env):
+    _write_hook(agent_env.search_hook, '#!/bin/sh\necho "{}"\nexit 2\n')
+    r = agent_env.client.post("/api/brain-orb/tool", json={"query": "x"})
+    assert r.status_code == 502
+
+
+# --- mint service: v1alpha client + locked constraints (#60 Phase 3) -------
+
+def test_mint_service_uses_v1alpha_and_locks_config(monkeypatch):
+    """The mint must build its OWN v1alpha client (not the voice singleton) and
+    lock the model + config, and return the token under `ephemeral_token`."""
+    import services.brain_orb_voice_service as svc
+
+    captured = {}
+
+    class _FakeAuthTokens:
+        def create(self, *, config):
+            captured["config"] = config
+            return types.SimpleNamespace(name="auth_tokens/xyz")
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.auth_tokens = _FakeAuthTokens()
+
+    monkeypatch.setattr(svc, "_client", None)  # reset the module singleton
+    monkeypatch.setattr(svc, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(svc.genai, "Client", _FakeClient)
+
+    out = asyncio.run(svc.mint_voice_token("cornelius", voice_name="Kore", agent_prompt=None))
+
+    # Own client built with api_version='v1alpha' (the singleton-reuse bug guard).
+    http_options = captured["client_kwargs"]["http_options"]
+    assert http_options.api_version == "v1alpha"
+    # Constraints lock the model + a config carrying the (non-write) tool surface.
+    cfg = captured["config"]
+    assert cfg.uses == 1
+    assert cfg.live_connect_constraints.model == svc.VOICE_MODEL
+    tool_names = {fd.name for t in cfg.live_connect_constraints.config.tools for fd in t.function_declarations}
+    assert "mount_scope" in tool_names
+    assert "capture_note" not in tool_names        # F3: no write tools in the manifest
+    assert "find_connections" not in tool_names
+    # Token surfaced under `ephemeral_token`, never `token` (F1).
+    assert out["ephemeral_token"] == "auth_tokens/xyz"
+    assert "token" not in out

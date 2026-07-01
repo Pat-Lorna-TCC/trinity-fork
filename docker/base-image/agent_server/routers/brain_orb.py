@@ -31,9 +31,14 @@ _SCOPES_HOOK = HOOK_DIR / "scopes"   # GET: print JSON {active, available}
 _SCOPE_HOOK = HOOK_DIR / "scope"     # POST: read JSON {tokens|mount|unmount} on stdin,
                                      #       mutate + re-export (rewrites data.json),
                                      #       print JSON {ok, active, nodes, edges}
+# #58 Phase 3 (trinity-enterprise#60) — read-only KB search. The voice tile's
+# navigate_to_note fallback (and any vault search) pipes a JSON query on stdin;
+# the hook runs a SCOPE-AWARE, READ-ONLY search over the vault (fails closed to
+# the core scope when none is mounted) and prints JSON results. No writes.
+_SEARCH_HOOK = HOOK_DIR / "search"   # POST: read JSON {query, ...} on stdin, print JSON {results|...}
 _HOME = Path("/home/developer")
-_MAX_HOOK_BODY = 64 * 1024           # scope requests are tiny token lists
-_MAX_HOOK_OUT = 4 * 1024 * 1024      # scope hooks return small JSON; cap defensively
+_MAX_HOOK_BODY = 64 * 1024           # scope/search requests are tiny (token list or query)
+_MAX_HOOK_OUT = 4 * 1024 * 1024      # hooks return small JSON; cap defensively
 
 
 def _hook_ready(path: Path) -> bool:
@@ -112,3 +117,20 @@ async def post_brain_orb_scope(request: Request):
         raise HTTPException(status_code=413, detail="Request too large")
     # 180s: a re-export over a large vault can be slow; the orb shows a spinner.
     return await _run_hook(_SCOPE_HOOK, stdin=body, timeout=180)
+
+
+@router.post("/api/brain-orb/tool")
+async def post_brain_orb_tool(request: Request):
+    """Run the agent's read-only KB-search hook (#58 Phase 3). Pipes the request
+    body (a JSON `{query, ...}`) to `~/.trinity/brain-orb/search`, which searches
+    the vault scope-aware and read-only and prints JSON results. 404 when the agent
+    ships no `search` hook (KB search unsupported → the orb degrades to in-graph
+    search). Read-only by hook contract; the mutating side stays the `scope` hook.
+    The backend proxy gates this at `AuthorizedAgentByName` (read access)."""
+    if not _hook_ready(_SEARCH_HOOK):
+        raise HTTPException(status_code=404, detail="KB search not supported")
+    body = await request.body()
+    if len(body) > _MAX_HOOK_BODY:
+        raise HTTPException(status_code=413, detail="Request too large")
+    # 30s: a vault search is read-only and quick; no re-export.
+    return await _run_hook(_SEARCH_HOOK, stdin=body, timeout=30)

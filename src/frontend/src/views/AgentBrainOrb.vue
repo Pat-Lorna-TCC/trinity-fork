@@ -42,6 +42,7 @@
         src="/brain-orb/index.html"
         title="Brain Orb"
         class="absolute inset-0 w-full h-full border-0"
+        allow="microphone"
         @load="sendInit"
       />
 
@@ -79,10 +80,12 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useSessionsStore } from '../stores/sessions'
 import AgentAvatar from '../components/AgentAvatar.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()
+const sessionsStore = useSessionsStore()
 
 const agentName = route.params.name
 const agent = ref(null)
@@ -98,6 +101,10 @@ function sendInit() {
       agentName,
       apiBase: '',                 // same-origin — relative /api paths
       authToken: authStore.token || '',
+      // #60 Phase 3: gate the client-held voice tile. The orb un-hides it only
+      // when the platform voice flag is on AND the agent is brain-orb-capable.
+      // The mint route is independently flag-gated (404), so this is UI-only.
+      voiceAvailable: !!sessionsStore.brainOrbVoiceAvailable,
     },
     window.location.origin,        // pin target origin (same-origin iframe)
   )
