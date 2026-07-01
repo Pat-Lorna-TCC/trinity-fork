@@ -1447,16 +1447,27 @@ async function refreshGraph(reason){
   if(!VOICE_PROXY || !SCOPE_ENABLED) return {error:'no backend'};
   if(refreshBusy || scopeBusy) return {error:'busy'};
   _refreshPending=false; clearTimeout(_refreshTimer);   // consume any pending debounced refresh
+  // #72 — snapshot the selection BY ID before the rebuild (teardownGraph wipes
+  // lastInspectedIdx/hover and node indices change), so we can re-select it after.
+  const selId=(lastInspectedIdx!=null && NODES[lastInspectedIdx]) ? NODES[lastInspectedIdx].id : null;
+  const selGroup=(!selId && hoverSet && hoverSet.length>1)
+    ? hoverSet.map(j=>NODES[j] && NODES[j].id).filter(Boolean) : null;
   refreshBusy=true; const ld=$('loading'); if(ld){ ld.textContent='integrating…'; ld.style.display=''; }
   try{ setState('ingesting'); }catch(_){ }
   try{
     const r=await fetch(VOICE_PROXY+'/refresh',{method:'POST',headers:{...ORB_HEADERS}});
     const res=await r.json();
     if(res&&res.ok){
-      const data=await (await fetch(VOICE_PROXY+'/data',{headers:ORB_HEADERS})).json();
-      applyData(data);
       const an=res.added_nodes||0, ae=res.added_edges||0;
-      toast((an||ae) ? ('graph updated · +'+an+' notes, +'+ae+' links') : 'graph up to date');
+      if(an||ae){   // #72 — rebuild ONLY when the graph actually changed (a no-op refresh keeps the selection)
+        const data=await (await fetch(VOICE_PROXY+'/data',{headers:ORB_HEADERS})).json();
+        applyData(data);
+        // restore the pre-refresh selection so adding a node/link mid-task doesn't deselect
+        if(selId!=null){ const ni=idIndex.get(selId); if(ni!=null) focusNode(ni); }
+        else if(selGroup && selGroup.length){ const idx=selGroup.map(id=>idIndex.get(id)).filter(v=>v!=null);
+          if(idx.length) highlightGroup(idx, true); }
+        toast('graph updated · +'+an+' notes, +'+ae+' links');
+      } else { toast('graph up to date'); }   // nothing new → no rebuild, selection intact
     } else { toast('refresh failed'+(res&&res.error?': '+res.error:'')); }
     return res;
   }catch(e){ toast('refresh failed ('+(e.message||e)+')'); return {error:String(e&&e.message||e)}; }
