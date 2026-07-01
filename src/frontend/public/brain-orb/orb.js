@@ -585,8 +585,7 @@ function highlightGroup(indices, frame){
   clusterLines.geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(seg),3));
   clusterLines.visible=true;
   hoverIndex=indices[0]; hoverSet=indices.slice(0,12); if(hoverLines) hoverLines.visible=false; pinned=true;
-  if(frame){ const cen=new THREE.Vector3(); for(const i of indices) cen.add(NODES[i]._pos); cen.multiplyScalar(1/indices.length);
-    if(cen.length()>1) focusDir(cen,250); lastZoom=performance.now()/1000; }
+  if(frame) frameNodes(indices);   // #70 — fit the whole group (was a fixed focusDir(cen,250))
   return seg.length/6;
 }
 // isolate one KB domain: colour the orb by domain + light up that domain's nodes & their links
@@ -827,11 +826,33 @@ function focusDir(vec, dist){
   _dir.copy(vec).normalize(); qFocus.setFromUnitVectors(_dir,_front);
   focusing=true; camTargetDist=dist||205;
 }
+// #70 — fit-to-selection: center on the selection's centroid direction AND pick a
+// zoom distance that frames it, instead of the old fixed 195/250. A single note zooms
+// in to its shell; a spread-out cluster zooms out to fit its angular cap in the FOV.
+// (Camera sits at (0,0,camDist) looking at origin; focusDir rotates the target to front.)
+const _fcen=new THREE.Vector3(), _fp=new THREE.Vector3();
+function frameNodes(indices){
+  if(!indices || !indices.length) return;
+  _fcen.set(0,0,0); let n=0;
+  for(const i of indices){ const p=NODES[i]&&NODES[i]._pos; if(p){ _fcen.add(p); n++; } }
+  if(!n || _fcen.length()<1e-3) return;
+  _fcen.multiplyScalar(1/n);
+  const dir=_fcen.clone().normalize();
+  let theta=0, rMax=0;                                  // angular spread + farthest shell
+  for(const i of indices){ const p=NODES[i]&&NODES[i]._pos; if(!p) continue;
+    rMax=Math.max(rMax, p.length());
+    const a=_fp.copy(p).normalize().angleTo(dir); if(a>theta) theta=a; }
+  const fov=((camera.fov||45)*Math.PI/180);
+  const lateral=rMax*Math.sin(theta);                  // half-extent of the cap across view
+  const depth=rMax*Math.cos(theta);                    // near face of the cap
+  const fit=depth + (lateral/Math.tan(fov/2)) + 60;    // fit the cap vertically + margin
+  focusDir(dir, zclamp(Math.max(rMax+45, fit)));       // never inside the node shell
+  lastZoom=performance.now()/1000;
+}
 function focusNode(i){
   const nd=NODES[i]; if(!nd) return;
-  focusDir(nd._pos,195); showInspector(i); setHover(i);
+  frameNodes([i]); showInspector(i); setHover(i);      // #70 — fit the note, not a fixed 195
   pinned=true;                         // keep the selection lit; a stray mouse move must not wipe it
-  lastZoom=performance.now()/1000;     // focusing stops the auto-rotation (resumes after idle)
   const h=nodePoints.geometry.attributes.aHeat; h.array[i]=1.0; h.needsUpdate=true;
   setTimeout(()=>{ h.array[i]=nd.heat||0; h.needsUpdate=true; },1700);
 }
