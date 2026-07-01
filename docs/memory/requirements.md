@@ -3514,10 +3514,20 @@ See [feature-flows/brain-orb.md](feature-flows/brain-orb.md).
   agent-server) for whole conversations. No DB change. **Confirmed on localhost**: constrained-token mint accepts
   the transcription config, and synthetic voice events render + save; full live-audio transcription streaming is a
   manual voice-session check.
+- **FR-10 — Write → graph refresh loop + visible integration (#67, #68)**: closes the gap where captured notes /
+  links landed in the inbox but never appeared on the orb. `POST /api/agents/{name}/brain-orb/refresh`
+  (`OwnedAgentByName`, 200s timeout mirroring `/scope`, audited `brain_orb_refresh`) → agent-server
+  `POST /api/brain-orb/refresh` → the `action` hook's `refresh` verb reindexes + re-exports `data.json` (folds inbox
+  notes + `_links.md` edges into the graph; the agent owns generation, Invariant #8). `orb.js` `refreshGraph()`
+  refetches `/data` and rebuilds **in place** (same machinery as `setScope`), auto-triggered after capture/link
+  (voice writes debounced ~4s so a burst coalesces into one rebuild), plus a visible **"↻ integrate & refresh"**
+  control, an "integrating…" state, and a "graph updated · +N notes, +M links" confirmation toast (#68). No DB
+  change. **Confirmed on localhost**: capture → refresh folds the note in as a real graph node (`1072 → 1079`),
+  and the UI control rebuilds with the confirmation toast.
 
 **Still out of scope**: `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface
 with a `template.yaml` allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh
-issue if it's ever wanted. Also deferred: data-freshness/on-demand-refresh trigger · `data.json` caching/streaming.
+issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 ---
 

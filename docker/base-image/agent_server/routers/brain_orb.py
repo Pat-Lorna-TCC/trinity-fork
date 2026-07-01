@@ -178,3 +178,15 @@ async def post_brain_orb_action(request: Request):
     # 60s: note write / link / transcript render are quick; the post-session claude -p
     # is spawned DETACHED by the hook (returns immediately), so this never blocks on it.
     return await _run_hook(_ACTION_HOOK, stdin=body, timeout=60)
+
+
+@router.post("/api/brain-orb/refresh")
+async def post_brain_orb_refresh():
+    """Reindex + re-export the graph so newly captured notes/links appear (#66/#67).
+    Runs the `action` hook with `{action:"refresh"}`; the agent folds inbox writes into
+    the graph and regenerates data.json (agent owns generation, Invariant #8). 180s —
+    a large-vault reindex can be slow (the backend proxy sits at 200s above this).
+    404 when the agent ships no `action` hook."""
+    if not _hook_ready(_ACTION_HOOK):
+        raise HTTPException(status_code=404, detail="Refresh not supported")
+    return await _run_hook(_ACTION_HOOK, stdin=b'{"action":"refresh"}', timeout=180)

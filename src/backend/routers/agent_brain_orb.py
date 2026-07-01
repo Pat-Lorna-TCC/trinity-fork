@@ -300,3 +300,28 @@ async def post_brain_orb_action(
         details={"action": action},
     )
     return result
+
+
+@router.post("/{agent_name}/brain-orb/refresh")
+async def post_brain_orb_refresh(agent_name: OwnedAgentByName, request: Request, current_user: CurrentUser):
+    """Reindex + re-export the agent's graph so newly captured notes / links appear on
+    the orb (#66/#67). **Owner/admin only.** Closes the write → re-export → refetch loop:
+    the orb calls this after a capture/link (and via a manual refresh), then re-fetches
+    `/brain-orb/data` and rebuilds in place — mirroring the Phase-2 scope flow. The agent
+    owns the reindex + generation (Invariant #8); Trinity brokers the trigger. 200s timeout
+    sits above the agent hook's 180s (a large-vault reindex can be slow). 404 when the agent
+    ships no `action` hook. Audited (`brain_orb_refresh`)."""
+    response = await _agent_request(agent_name, "POST", "/api/brain-orb/refresh", timeout=200.0)
+    result = _passthrough(response, not_found="Refresh not supported")
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="brain_orb_refresh",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+    )
+    return result

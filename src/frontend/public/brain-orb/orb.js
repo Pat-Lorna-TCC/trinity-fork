@@ -1205,10 +1205,9 @@ const ORB_TOOLS={
     const text=(body||title||'').trim();
     if(!text) return {error:'nothing to capture'};
     const r=await postAction('capture',{title:title||'', body:text});
-    if(r&&r.ok){ addLiveNote(r.title||text.slice(0,60), text);   // show it as a persistent session cell
-      setState('ingesting'); setTimeout(()=>setState('idle'),3000);
+    if(r&&r.ok){ scheduleRefresh();   // #67 — fold it into the real graph (debounced across a burst)
       return {ok:true, title:r.title, recorded_to:r.path,
-              note:'recorded to 00-Inbox; it will be wired into the graph at the next reindex — not connected yet'}; }
+              note:'recorded and being integrated into the graph — it will appear on the orb shortly'}; }
     return {error:(r&&r.error)||'capture failed'};
   },
   // #61 Phase 4a — voice-triggered link (owner sessions only; the write tools are in the
@@ -1217,7 +1216,8 @@ const ORB_TOOLS={
     if(!ACTIONS.enabled) return {error:'the action backend is not available'};
     if(!source||!target) return {error:'need both a source and a target note'};
     const r=await postAction('link',{from:source, to:target});
-    if(r&&r.ok) return {ok:true, linked:[source, target], already:!!r.already};
+    if(r&&r.ok){ if(!r.already) scheduleRefresh();   // #67 — persist the edge into the real graph
+      return {ok:true, linked:[source, target], already:!!r.already}; }
     return {error:(r&&r.error)||'link failed'};
   },
   // ---- scope tools: bring a book/company/research INTO view + into what the voice can search ----
@@ -1409,6 +1409,29 @@ async function setScope(tokens){
   }catch(e){ toast('scope change failed ('+(e.message||e)+')'); return {error:String(e&&e.message||e)}; }
   finally{ scopeBusy=false; sp&&sp.classList.remove('busy'); if(ld) ld.style.display='none'; }
 }
+// #66/#67 — close the write → reindex/re-export → refetch loop. After a capture/link
+// (or a manual refresh), ask the agent to fold new inbox notes/links into the graph,
+// then refetch /data and rebuild IN PLACE (same machinery as setScope). #68: a visible
+// "integrating…" state + a result toast so the user can confirm the write landed.
+let refreshBusy=false;
+async function refreshGraph(reason){
+  if(!VOICE_PROXY || !SCOPE_ENABLED) return {error:'no backend'};
+  if(refreshBusy || scopeBusy) return {error:'busy'};
+  refreshBusy=true; const ld=$('loading'); if(ld){ ld.textContent='integrating…'; ld.style.display=''; }
+  try{ setState('ingesting'); }catch(_){ }
+  try{
+    const r=await fetch(VOICE_PROXY+'/refresh',{method:'POST',headers:{...ORB_HEADERS}});
+    const res=await r.json();
+    if(res&&res.ok){
+      const data=await (await fetch(VOICE_PROXY+'/data',{headers:ORB_HEADERS})).json();
+      applyData(data);
+      const an=res.added_nodes||0, ae=res.added_edges||0;
+      toast((an||ae) ? ('graph updated · +'+an+' notes, +'+ae+' links') : 'graph up to date');
+    } else { toast('refresh failed'+(res&&res.error?': '+res.error:'')); }
+    return res;
+  }catch(e){ toast('refresh failed ('+(e.message||e)+')'); return {error:String(e&&e.message||e)}; }
+  finally{ refreshBusy=false; if(ld) ld.style.display='none'; try{ setState('idle'); }catch(_){ } }
+}
 // tear down the per-build THREE objects + reset the collections buildGraph appends to,
 // so applyData can rebuild the scene in place (no reload → the voice socket survives)
 function teardownGraph(){
@@ -1464,6 +1487,12 @@ function toggleActions(force){
   if(open){ if(!ACTIONS.enabled) setActStatus('backend offline — capture/skills disabled'); setTimeout(()=>$('capInput')&&$('capInput').focus(),50); }
 }
 $('actClose')&&($('actClose').onclick=()=>toggleActions(false));
+// #68 — visible manual "integrate & refresh" control (reindex + re-export + rebuild).
+$('refreshGraphBtn')&&($('refreshGraphBtn').onclick=()=>refreshGraph('manual'));
+// #67 — voice-created writes come in bursts; coalesce them into ONE rebuild a few
+// seconds after the last one so the orb isn't torn down mid-conversation per capture.
+let _refreshTimer=null;
+function scheduleRefresh(){ clearTimeout(_refreshTimer); _refreshTimer=setTimeout(()=>refreshGraph('voice'),4000); }
 
 /* --- capture a thought -> a note in 00-Inbox (the note lands now; it joins the graph at the next reindex) --- */
 // Re-entrancy guard: each postAction mints a fresh Idempotency-Key, so a double-click
@@ -1478,8 +1507,9 @@ async function doCapture(){
   let r; try{ r=await postAction('capture',{body}); } finally { _capInFlight=false; }
   if(r&&r.ok){ ta.value=''; setActStatus(''); toggleActions(false);
     toast('captured → '+(r.title||'inbox').slice(0,40));
-    addLiveNote(r.title||body.split('\n')[0].slice(0,60), body);   // persistent, visible all session
-    setState('ingesting'); setTimeout(()=>setState('idle'),3500); }   // visual: a new signal streams in
+    // #67 — fold it into the actual graph so it appears as a real, connectable node
+    // (replaces the old transient live-cell that read as "not connected").
+    refreshGraph('capture'); }
   else setActStatus('capture failed: '+((r&&r.error)||'?'));
 }
 $('capSave')&&($('capSave').onclick=doCapture);
@@ -1568,7 +1598,8 @@ async function doLink(toIdx){
   if(toIdx===from.idx){ toast('cannot link a note to itself'); return; }
   const r=await postAction('link',{from:from.title, to:to.title});
   if(r&&r.ok){ addLiveEdge(from.idx,toIdx); registerLink(NODES[from.idx].id,to.id);
-    toast(r.already?'already linked':'linked → '+to.title.slice(0,26)); focusNode(from.idx); }
+    toast(r.already?'already linked':'linked → '+to.title.slice(0,26)); focusNode(from.idx);
+    if(!r.already) refreshGraph('link'); }   // #67 — persist the edge into the real graph
   else toast('link failed: '+((r&&r.error)||'?'));
 }
 $('iaConnect')&&($('iaConnect').onclick=startLink);

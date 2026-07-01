@@ -608,6 +608,59 @@ def test_action_transcript_verbs_forwarded(client):
         agent_req.assert_awaited_once()
 
 
+_REFRESH_URL = f"/api/agents/{_AGENT}/brain-orb/refresh"
+
+
+def test_refresh_success_and_audited(client):
+    """#66/#67 — refresh reindexes + re-exports; owner-gated, audited, passes through."""
+    audit = AsyncMock()
+    with patch.object(bo, "_agent_request", AsyncMock(return_value=_resp(200, b'{"ok":true,"nodes":1073,"added_nodes":1}'))), \
+         patch.object(bo.platform_audit_service, "log", audit):
+        r = client.post(_REFRESH_URL)
+    assert r.status_code == 200
+    assert r.json()["added_nodes"] == 1
+    audit.assert_awaited_once()
+    assert audit.await_args.kwargs["event_action"] == "brain_orb_refresh"
+
+
+def test_refresh_owner_gate_403(client):
+    _deny_owner(client)
+    agent_req = AsyncMock()
+    with patch.object(bo, "_agent_request", agent_req):
+        r = client.post(_REFRESH_URL)
+    assert r.status_code == 403
+    agent_req.assert_not_called()
+
+
+def test_refresh_flag_off_404(client, monkeypatch):
+    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    with patch.object(bo, "get_agent_container", return_value=_running()):
+        r = client.post(_REFRESH_URL)
+    assert r.status_code == 404
+
+
+def test_refresh_no_hook_404(client):
+    with patch.object(bo, "get_agent_container", return_value=_running()), patch.object(
+        bo, "agent_httpx_client", _fake_httpx(result=_resp(404))
+    ), patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_REFRESH_URL)
+    assert r.status_code == 404
+
+
+def test_agent_server_refresh_runs_action_hook(agent_env):
+    # the refresh route runs the action hook with {"action":"refresh"} on stdin
+    _write_hook(agent_env.action_hook,
+                '#!/bin/sh\nbody=$(cat)\necho "{\\"ok\\":true,\\"received\\":$body}"\n')
+    r = agent_env.client.post("/api/brain-orb/refresh")
+    assert r.status_code == 200
+    assert r.json()["received"] == {"action": "refresh"}
+
+
+def test_agent_server_refresh_absent_404(agent_env):
+    r = agent_env.client.post("/api/brain-orb/refresh")
+    assert r.status_code == 404
+
+
 def test_action_transcript_large_body_allowed(client):
     """A whole voice conversation can exceed the 64 KiB capture/link cap — the action
     cap is raised to accommodate transcripts (#66)."""
