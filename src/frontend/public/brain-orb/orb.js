@@ -91,7 +91,7 @@ const R = 120;                  // sphere radius
 /* ============================ scene ============================ */
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));   // #60: cap retina 2x→1.5x for GPU headroom inside the Trinity SPA (the standalone had the whole thread; here the orb shares it) — halves fill jank on hi-DPR displays
 renderer.setSize(innerWidth, innerHeight);
 
 const scene = new THREE.Scene();
@@ -898,6 +898,16 @@ function renderBriefing(data){
       </div>
     </div>`;
 
+  // #60: the brief cards' innerHTML was just replaced, which wiped the boot-time
+  // close ✕ — re-inject it so every widget keeps its visible close button.
+  ['brief1','brief2','brief3'].forEach(id=>{
+    const el=$(id); if(!el || el.querySelector('.tile-x')) return;
+    const x=document.createElement('span'); x.className='tile-x'; x.textContent='✕';
+    x.title='hide this tile (re-open it from the dock)';
+    x.onclick=ev=>{ ev.stopPropagation(); setTile(id, false); };
+    el.appendChild(x);
+  });
+
   // collapsible sections (converged / tensions / hubs) — collapsed state persisted in localStorage
   const collapsed=loadCollapsed();
   $('brief3').querySelectorAll('.bh-toggle').forEach(h=>{
@@ -1677,11 +1687,15 @@ function renderDock(){
   const lensChip=`<span class="dchip ${lOn?'on':''}" data-lens="1">lens</span>`;
   const scOn=$('scopePanel')&&$('scopePanel').classList.contains('show');
   const scopeChip=`<span class="dchip ${scOn?'on':''}" data-scope="1">scope</span>`;
-  d.innerHTML='<span class="dlabel">tiles</span>'+tileChips+voiceChip+lensChip+scopeChip;
+  // #60: search (find) is closeable too, so it gets a dock chip to re-open it.
+  const seOn=$('search')&&!$('search').classList.contains('search-off');
+  const searchChip=`<span class="dchip ${seOn?'on':''}" data-search="1">find</span>`;
+  d.innerHTML='<span class="dlabel">tiles</span>'+tileChips+voiceChip+lensChip+scopeChip+searchChip;
   d.querySelectorAll('[data-tile]').forEach(c=>c.onclick=()=>toggleTile(c.dataset.tile));
   const vc=d.querySelector('[data-voice]'); if(vc) vc.onclick=()=>toggleVoice();
   const lc=d.querySelector('[data-lens]'); if(lc) lc.onclick=()=>toggleLens();
   const sc=d.querySelector('[data-scope]'); if(sc) sc.onclick=()=>toggleScopePanel();
+  const se=d.querySelector('[data-search]'); if(se) se.onclick=()=>{ const s=$('search'); if(s){ s.classList.toggle('search-off'); renderDock(); } };
 }
 // inject a hover ✕ into each tile and apply any saved hidden state
 TILES.forEach(([id])=>{
@@ -1690,6 +1704,18 @@ TILES.forEach(([id])=>{
   x.title='hide this tile (re-open it from the dock)';
   x.onclick=ev=>{ ev.stopPropagation(); setTile(id, false); };
   el.appendChild(x); applyTile(id);
+});
+// #60: the toggle-panels (lens, scope, search) aren't in TILES but must ALSO have
+// a visible ✕ so every widget is closeable. They hide via their own toggle; the
+// dock chips (lens / scope / find) re-open them.
+[['lensPanel',()=>toggleLens(false)],
+ ['scopePanel',()=>toggleScopePanel(false)],
+ ['search',()=>{ const s=$('search'); if(s){ s.classList.add('search-off'); renderDock(); } }]
+].forEach(([id,close])=>{
+  const el=document.getElementById(id); if(!el || el.querySelector('.tile-x')) return;
+  const x=document.createElement('span'); x.className='tile-x'; x.textContent='✕'; x.title='close (re-open from the dock)';
+  x.onclick=ev=>{ ev.stopPropagation(); close(); };
+  el.appendChild(x);
 });
 renderDock();
 

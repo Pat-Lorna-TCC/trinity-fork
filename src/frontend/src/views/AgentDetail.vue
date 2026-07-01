@@ -67,6 +67,7 @@
             :emotion-avatar-url="emotionAvatarUrl"
             :voice-available="sessionsStore.voiceAvailable"
             :workspace-available="sessionsStore.workspaceAvailable"
+            :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
           <!-- Tabs -->
@@ -82,6 +83,11 @@
             <!-- Info Tab Content -->
             <div v-if="activeTab === 'info'" class="p-6">
               <InfoPanel :agent-name="agent.name" :agent-status="agent.status" @item-click="handleInfoItemClick" />
+            </div>
+
+            <!-- Brain Tab Content (#60) — settings + launch, not an auto-jump -->
+            <div v-if="activeTab === 'brain'" class="p-6">
+              <BrainPanel :name="agent.name" :running="agent.status === 'running'" />
             </div>
 
             <!-- Tasks Tab Content -->
@@ -309,6 +315,7 @@ import SettingsPanel from '../components/settings/SettingsPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
+import BrainPanel from '../components/BrainPanel.vue'
 import ResourceModal from '../components/ResourceModal.vue'
 import AvatarGenerateModal from '../components/AvatarGenerateModal.vue'
 import LogsPanel from '../components/LogsPanel.vue'
@@ -984,13 +991,9 @@ async function checkBrainOrbCapability() {
   }
 }
 
-// Selecting the Brain tab is a route hop, not an in-page panel: push to the
-// dedicated full-page orb. The component unmounts, so no stale activeTab to reset.
-watch(activeTab, (tab) => {
-  if (tab === 'brain' && agent.value?.name) {
-    router.push({ name: 'AgentBrainOrb', params: { name: agent.value.name } })
-  }
-})
+// #60: the Brain tab is now an in-page settings panel (BrainPanel) with a launch
+// button — no longer an auto-jump to the full-page orb (that was confusing). The
+// header brain logo and the panel's "Open Brain Orb" button do the route hop.
 
 // Load auth status (subscription vs API key)
 async function loadAuthStatus() {

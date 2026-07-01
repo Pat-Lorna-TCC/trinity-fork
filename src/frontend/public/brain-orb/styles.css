@@ -240,10 +240,13 @@ body{
 #brief3::-webkit-scrollbar-thumb{background:rgba(99,179,237,.28);border-radius:9999px}
 /* ---- tile show/hide: per-panel close (✕) + the dock that re-opens them ---- */
 .tile-hidden{display:none !important}
-.tile-x{position:absolute;top:6px;right:9px;font-size:12px;line-height:1;cursor:pointer;
-  color:var(--color-mist);opacity:0;transition:opacity .15s;z-index:3}
-.panel:hover>.tile-x{opacity:.45}
+/* #60: the ✕ is always present (small + subtle), not hover-only, so every widget
+   is visibly closeable; it brightens on hover. */
+.tile-x{position:absolute;top:6px;right:9px;font-size:11px;line-height:1;cursor:pointer;
+  color:var(--color-mist);opacity:.32;transition:opacity .15s;z-index:3}
+.panel:hover>.tile-x{opacity:.6}
 .tile-x:hover{opacity:1;color:var(--color-ice-blue)}
+#search.search-off{display:none}
 /* dock: always-visible row of chips, one per tile (lit = shown). Your escape hatch — never hidden. */
 #dock{top:74px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:7px 12px}
 #dock .dlabel{font-size:10px;letter-spacing:.13em;text-transform:uppercase;opacity:.4;margin-right:2px}
