@@ -2,7 +2,7 @@
 
 > **Type**: feature · P2 · `theme-ui-ux` · first child of the tighter-Cornelius-integration epic
 >
-> **One-line**: Capability-gated per-agent page that renders a Cornelius-class agent's live 3D knowledge-graph orb from data the agent produces in its own container, with live scope control and a client-held voice tile. **Shipped: Phase 1 (static render + read path) + Phase 2 (scope mount/unmount → re-export → live rebuild) + Phase 3 (client-held Gemini Live voice + read-only KB search) + Phase 4a (owner-gated KB-write actions: capture + link).** `run_skill` (headless exec), automatic transcript capture, and headless-skill injection are deferred to **Phase 4b (trinity-enterprise#66)**.
+> **One-line**: Capability-gated per-agent page that renders a Cornelius-class agent's live 3D knowledge-graph orb from data the agent produces in its own container, with live scope control and a client-held voice tile. **Shipped: Phase 1 (static render + read path) + Phase 2 (scope mount/unmount → re-export → live rebuild) + Phase 3 (client-held Gemini Live voice + read-only KB search) + Phase 4a (owner-gated KB-write actions: capture + link) + Phase 4b (voice-transcript capture + configurable post-session processing, #66).** Only `run_skill` (arbitrary headless exec from the orb) remains out of scope.
 
 ## Scope (and what is deferred)
 
@@ -12,8 +12,9 @@ The full issue describes voice (client-held Gemini Live), a scope mount→re-exp
 - **Phase 2 — live scope control.** Button-driven scope mount/unmount → agent re-export → live in-place rebuild, via owner-gated broker + agent convention hooks. No Gemini/voice.
 - **Phase 3 — client-held voice tile + read-only KB search.** The browser holds its own Gemini Live socket (ephemeral-token broker); visual tools + scope-by-voice run in-browser; a read-only `search` hook backs whole-vault lookup. KB WRITES stay off.
 - **Phase 4a — owner-gated KB-write actions (capture + link).** Owner/admin-only capture-a-note and link-two-notes via a new broker `POST /action` route → an agent `~/.trinity/brain-orb/action` convention hook. Behind its own `BRAIN_ORB_WRITE_ENABLED` kill-switch, rate-limited, audit-logged, `Idempotency-Key`-deduped. Voice owners get capture/link folded into the locked manifest.
+- **Phase 4b — voice-transcript capture + post-session processing (#66).** The mint enables Gemini `input/output_audio_transcription` (locked into the constrained token); `voice.js` buffers per-turn transcription into conversation events and, on `endConversation`, relays them to `orb.js` which POSTs `capture_transcript` (session-id = Idempotency-Key). The `action` hook renders a markdown transcript into `resources/inbox/Voice Conversations/` (ported from the original `transcript_io.py`). Optional **post-session processing**: `process_transcript` (or `capture_transcript {process:true}`) runs the agent's **configured prompt** (`~/.trinity/brain-orb/voice-postprocess.md` — configuring it is the opt-in) over the transcript via a **detached** `claude -p` (transcript piped on stdin — no shell string), writing a processed note. Mirrors `cornelius-internal/resources/agent-visualization/voice/`.
 
-**Deferred to Phase 4b (trinity-enterprise#66):** `run_skill` (headless `claude -p` exec) · automatic transcript-capture pipeline · headless skill injection. These carry the exec/injection risk + an unproven Gemini-Live-transcription dependency and were split out during `/autoplan` (two independent reviews); 4b must inherit the #1083 detached-execution subsystem + a template.yaml allow-list ceiling + a transcription spike.
+**Still out of scope:** `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface with a template.yaml allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh issue if it's ever wanted.
 
 ## Phase 2 — live scope control
 
@@ -109,6 +110,37 @@ orb panel open → initActions()
 **Agent convention (Invariant #8):** the agent ships one executable `~/.trinity/brain-orb/action` hook (a fourth sibling next to `scopes`/`scope`/`search`) that dispatches on the request's `action` field (`list` → allow-list, `capture`, `link`) and owns the write semantics; Trinity runs it via the same hardened `_run_hook` and 404s when absent. The backend enum-restricts the verb before forwarding.
 
 **Kill-switch:** `BRAIN_ORB_WRITE_ENABLED` (env, default OFF) — distinct from `BRAIN_ORB_ENABLED` so writes can be disabled without downing the read path or voice tile. Surfaced as `brain_orb_write_available` in `GET /api/settings/feature-flags`; the host relays it to the orb (`writeAvailable`), which only attempts `initActions` when on.
+
+## Phase 4b — voice-transcript capture + post-session processing (#66)
+
+Mirrors the original `cornelius-internal/resources/agent-visualization/voice/` (proxy_server.py + transcript_io.py): the **client** captures per-turn transcription and the **agent** renders + saves it. Trinity brokers.
+
+```
+mint: brain_orb_voice_service adds input_audio_transcription + output_audio_transcription
+      to the LOCKED LiveConnectConfig → the constrained ephemeral token returns transcription
+
+voice.js (nested iframe, no JWT):
+  handleServerMessage → buffer content.inputTranscription / outputTranscription per turn
+    → on turnComplete: push {event:user_turn|model_turn, text}; tool calls → {event:tool_call}
+  endConversation()  ← the correct flush seam (onclose early-returns on wsClosedByUs)
+    → flushTranscript(): append {event:session_end} → postMessage 'orb-capture-transcript'
+                         {session_id, events} to the parent orb
+
+orb.js (holds the JWT):
+  on 'orb-capture-transcript' (owner + ACTIONS.enabled) →
+    postAction('capture_transcript', {session_id, events, process:true}, idemKey=session_id)
+    POST /api/agents/{name}/brain-orb/action  (OwnedAgentByName; Idempotency-Key=session_id)
+
+backend → agent-server → ~/.trinity/brain-orb/action hook:
+  capture_transcript → render markdown (ported transcript_io) → resources/inbox/Voice Conversations/Voice - <ts>.md
+  process (opt-in): if ~/.trinity/brain-orb/voice-postprocess.md exists → detached `claude -p <prompt>`
+                    with the transcript piped on STDIN (no shell string) → "<name> - processed.md"
+```
+
+- **Transcription is proven on the constrained path**: `auth_tokens.create` accepts the transcription config, and the mint returns a real token. (Full live-audio confirmation that Gemini *streams* transcription events is a manual voice-session check — the config-acceptance + save path are automated.)
+- **Idempotency by session**: the session id is the `Idempotency-Key`, so a double `session_end`/`onclose` saves exactly one transcript.
+- **Post-session processing = agent-configured prompt** (`voice-postprocess.md`) — configuring it is the opt-in; absent ⇒ a no-op. Runs **detached** so the session-end call returns promptly; transcript on stdin (never a shell arg) closes command injection; owner-only + owner-authored prompt + owner's-own-transcript keeps the injection surface minimal. Body cap raised to 1 MiB (backend + agent-server) for whole conversations.
+- **Owner-only**: transcripts save only when the caller owns the agent (`ACTIONS.enabled` + `OwnedAgentByName`) — a shared user's session isn't persisted (no cross-user KB write).
 
 ## Why first-party + iframe (the CSP nuance, #979)
 

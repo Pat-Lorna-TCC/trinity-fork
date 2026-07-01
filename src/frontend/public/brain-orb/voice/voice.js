@@ -40,7 +40,40 @@
   var audioCtx = null, micStream = null, micNode = null, nextPlayTime = 0;
   var outAnalyser = null, outDataArray = null;   // feeds the p5 audio-reactive orb
 
+  // #66 transcript capture — mirror the original Cornelius voice proxy: buffer
+  // per-turn transcription, collect conversation events, flush them to the parent
+  // orb on session end (the parent holds the JWT and POSTs capture_transcript).
+  var _events = [];               // {event, ts, text|tool|args} for the conversation
+  var _userTextBuf = '', _modelTextBuf = '';
+  var _sessionId = null;          // per-session id → Idempotency-Key (double-end = one save)
+  var _flushed = false;
+
   function $(id) { return document.getElementById(id); }
+
+  function _uuid() {
+    try { return crypto.randomUUID(); } catch (e) { return 's' + Date.now() + Math.random().toString(36).slice(2); }
+  }
+  function _logEvent(e) { _events.push({ ts: new Date().toISOString(), ...e }); }
+  function _flushTurns() {   // push any buffered transcription as turn events
+    if (_userTextBuf.trim()) { _logEvent({ event: 'user_turn', text: _userTextBuf.trim() }); _userTextBuf = ''; }
+    if (_modelTextBuf.trim()) { _logEvent({ event: 'model_turn', text: _modelTextBuf.trim() }); _modelTextBuf = ''; }
+  }
+  // The correct flush seam (#66): user-stop goes through endConversation (sets
+  // wsClosedByUs), so onclose early-returns — a flush wired only to onclose would
+  // never fire on the normal path. Called from BOTH endConversation and the
+  // error-close branch; idempotent via _flushed.
+  function flushTranscript() {
+    if (_flushed) return;
+    _flushed = true;
+    _flushTurns();
+    _logEvent({ event: 'session_end' });
+    var hasDialogue = _events.some(function (e) { return e.event === 'user_turn' || e.event === 'model_turn'; });
+    if (hasDialogue) {
+      try {
+        window.parent.postMessage({ type: 'orb-capture-transcript', session_id: _sessionId, events: _events }, '*');
+      } catch (e) { console.warn('[brain-orb voice] transcript relay failed:', e.message); }
+    }
+  }
 
   // ── parent bridge (the orb page holds the JWT + runs the visual tools) ───────
   // The parent replies to a token request with {type:'orb-voice-token', ...}. We
@@ -193,6 +226,10 @@
       ws.onopen = function () {
         // Config is locked in the token; send only the model (SDK Constrained path).
         ws.send(JSON.stringify({ setup: { model: model } }));
+        // Start a fresh transcript session (#66).
+        _events = []; _userTextBuf = ''; _modelTextBuf = ''; _flushed = false;
+        _sessionId = _uuid();
+        _logEvent({ event: 'session_start' });
         setTimeout(function () {
           if (appState === 'CONNECTING') {
             setError('timed out connecting to voice');
@@ -214,6 +251,7 @@
       ws.onerror = function () { console.warn('[brain-orb voice] WS error (close follows)'); };
       ws.onclose = function (event) {
         if (wsClosedByUs) return;
+        flushTranscript();   // #66 — server/error close: still save what we captured
         cleanupAudio();
         if (event.code === 1000 || event.code === 1001) setState('IDLE');
         else setError('voice disconnected (' + event.code + ') — press start to retry');
@@ -236,6 +274,7 @@
       var responses = await Promise.all(calls.map(async function (fc) {
         // Every tool is an orb tool (the locked manifest only declares orb tools);
         // the parent runs it against ORB_TOOLS and drives the visualisation.
+        _logEvent({ event: 'tool_call', tool: fc.name, args: fc.args || {} });   // #66 transcript
         var output = await callParentOrb(fc.name, fc.args || {});
         return { id: fc.id, response: { output: output } };
       }));
@@ -255,8 +294,19 @@
           if (blob && blob.data) enqueueAudio(blob.data);
         }
       }
+      // #66 transcript — accumulate Gemini's input/output transcription per turn.
+      // Model speech arriving flushes any pending user turn first (turn boundary).
+      var outTx = content.outputTranscription || content.output_audio_transcription;
+      if (outTx && outTx.text) {
+        if (_userTextBuf.trim()) { _logEvent({ event: 'user_turn', text: _userTextBuf.trim() }); _userTextBuf = ''; }
+        _modelTextBuf += outTx.text;
+      }
+      var inTx = content.inputTranscription || content.input_audio_transcription;
+      if (inTx && inTx.text) _userTextBuf += inTx.text;
+
       if (content.turnComplete || content.turn_complete ||
           content.generationComplete || content.generation_complete) {
+        _flushTurns();   // finalize both buffered turns at the turn boundary
         var wait = Math.max(0, (nextPlayTime - audioCtx.currentTime) * 1000 + 150);
         setTimeout(function () { if (appState === 'SPEAKING') setState('READY'); }, wait);
       }
@@ -264,6 +314,7 @@
   }
 
   function endConversation() {
+    flushTranscript();   // #66 — save the transcript BEFORE tearing down (correct seam)
     wsClosedByUs = true;
     if (ws) { try { ws.close(1000, 'user ended'); } catch (e) {} ws = null; }
     cleanupAudio();

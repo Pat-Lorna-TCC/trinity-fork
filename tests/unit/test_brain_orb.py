@@ -581,14 +581,44 @@ def test_action_link_success(client):
 
 
 def test_action_unsupported_verb_rejected_400(client):
-    """run_skill / capture_transcript are Phase 4b (#66) — rejected at the boundary,
-    never forwarded to the agent hook."""
+    """run_skill (arbitrary exec) remains out of scope — rejected at the boundary,
+    never forwarded to the agent hook. Transcript verbs are covered separately."""
     agent_req = AsyncMock()
-    for verb in ("run_skill", "capture_transcript", "delete", ""):
+    for verb in ("run_skill", "delete", ""):
         with patch.object(bo, "_agent_request", agent_req):
             r = client.post(_ACTION_URL, json={"action": verb, "skill": "x"})
         assert r.status_code == 400, verb
     agent_req.assert_not_called()
+
+
+def test_action_transcript_verbs_forwarded(client):
+    """#66 — capture_transcript + process_transcript are accepted and forwarded to
+    the agent hook (owner-gated, audited)."""
+    for verb, payload in (
+        ("capture_transcript", {"action": "capture_transcript", "session_id": "s1",
+                                 "events": [{"event": "user_turn", "text": "hi"}]}),
+        ("process_transcript", {"action": "process_transcript", "path": "~/x.md"}),
+    ):
+        agent_req = AsyncMock(return_value=_resp(200, b'{"ok":true}'))
+        with patch.object(bo, "_agent_request", agent_req), patch.object(
+            bo.platform_audit_service, "log", AsyncMock()
+        ):
+            r = client.post(_ACTION_URL, json=payload)
+        assert r.status_code == 200, verb
+        agent_req.assert_awaited_once()
+
+
+def test_action_transcript_large_body_allowed(client):
+    """A whole voice conversation can exceed the 64 KiB capture/link cap — the action
+    cap is raised to accommodate transcripts (#66)."""
+    big = [{"event": "user_turn", "text": "x" * 200_000}]
+    agent_req = AsyncMock(return_value=_resp(200, b'{"ok":true,"saved":true}'))
+    with patch.object(bo, "_agent_request", agent_req), patch.object(
+        bo.platform_audit_service, "log", AsyncMock()
+    ):
+        r = client.post(_ACTION_URL, json={"action": "capture_transcript",
+                                           "session_id": "s2", "events": big})
+    assert r.status_code == 200
 
 
 def test_action_write_flag_off_404(client, monkeypatch):
@@ -598,8 +628,9 @@ def test_action_write_flag_off_404(client, monkeypatch):
 
 
 def test_action_body_too_large_413(client):
-    # > 64 KiB raw body — rejected before any agent call / parse.
-    r = client.post(_ACTION_URL, json={"action": "capture", "body": "x" * 70_000})
+    # > 1 MiB raw body — rejected before any agent call / parse (cap raised for
+    # transcripts in #66; capture/link bodies are naturally tiny).
+    r = client.post(_ACTION_URL, json={"action": "capture", "body": "x" * 1_100_000})
     assert r.status_code == 413
 
 
@@ -702,6 +733,10 @@ def test_mint_service_adds_write_tools_when_can_write(monkeypatch):
     assert "run_skill" not in names                   # exec deferred to Phase 4b (#66)
     assert "mount_scope" in names                      # read/scope tools still there
     assert "capture_note" in out["tools"]
+    # #66 — transcription is locked into the token so the client receives per-turn text.
+    locked = cfg.live_connect_constraints.config
+    assert locked.input_audio_transcription is not None
+    assert locked.output_audio_transcription is not None
 
 
 def test_voice_token_shared_user_gets_readonly_manifest(client):
@@ -776,7 +811,8 @@ def test_agent_server_action_absent_404(agent_env):
 
 
 def test_agent_server_action_body_too_large_413(agent_env):
+    # cap raised to 1 MiB for transcripts (#66); capture/link bodies stay tiny.
     _write_hook(agent_env.action_hook, '#!/bin/sh\ncat >/dev/null\necho "{}"\n')
     r = agent_env.client.post("/api/brain-orb/action",
-                              json={"action": "capture", "body": "x" * 70_000})
+                              json={"action": "capture", "body": "x" * 1_100_000})
     assert r.status_code == 413

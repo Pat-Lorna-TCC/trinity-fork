@@ -157,18 +157,24 @@ async def get_brain_orb_actions():
     return await _run_hook(_ACTION_HOOK, stdin=b'{"action":"list"}', timeout=30)
 
 
+# capture/link bodies are tiny, but capture_transcript (#66) carries a whole voice
+# conversation — allow up to 1 MiB (the backend proxy gates owner-only + rate-limited).
+_MAX_ACTION_BODY = 1024 * 1024
+
+
 @router.post("/api/brain-orb/action")
 async def post_brain_orb_action(request: Request):
-    """Run an owner-gated KB-write action (#58 Phase 4a). Pipes the request body (a
-    JSON `{action, ...}`) to `~/.trinity/brain-orb/action`, which performs the write
-    (capture a note / link two notes) and prints JSON. 404 when the agent ships no
-    `action` hook. The backend proxy gates this at `OwnedAgentByName` (owner/admin)
-    and enum-restricts `action` to capture/link in Phase 4a. run_skill + transcript
-    capture are Phase 4b (trinity-enterprise#66)."""
+    """Run an owner-gated KB-write action. Pipes the request body (a JSON `{action, ...}`)
+    to `~/.trinity/brain-orb/action`, which performs the write and prints JSON. 404 when
+    the agent ships no `action` hook. The backend proxy gates this at `OwnedAgentByName`
+    (owner/admin) and enum-restricts the verb (capture/link + capture_transcript/
+    process_transcript, #66; run_skill stays out). The hook forks its own detached
+    `claude -p` for post-session processing, so this call still returns promptly."""
     if not _hook_ready(_ACTION_HOOK):
         raise HTTPException(status_code=404, detail="KB writes not supported")
     body = await request.body()
-    if len(body) > _MAX_HOOK_BODY:
+    if len(body) > _MAX_ACTION_BODY:
         raise HTTPException(status_code=413, detail="Request too large")
-    # 60s: a note write / link is quick; no re-export or headless run in 4a.
+    # 60s: note write / link / transcript render are quick; the post-session claude -p
+    # is spawned DETACHED by the hook (returns immediately), so this never blocks on it.
     return await _run_hook(_ACTION_HOOK, stdin=body, timeout=60)

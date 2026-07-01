@@ -3421,10 +3421,10 @@ servers (each replica polls + reconciles independently).
 3D knowledge-graph orb from data the agent produces in its own container, with live scope control
 and a client-held voice tile. **Shipped: static render (Phase 1, FR-1…5) + scope mount/unmount →
 re-export → live rebuild (Phase 2, FR-6) + client-held Gemini Live voice tile + read-only KB search
-(Phase 3, FR-7) + owner-gated KB-write actions capture/link (Phase 4a, FR-8).** `run_skill` (headless
-exec), automatic transcript capture, and headless-skill injection remain deferred to **Phase 4b
-(trinity-enterprise#66)**. Default OFF — no impact on other agents or the UI. See
-[feature-flows/brain-orb.md](feature-flows/brain-orb.md).
+(Phase 3, FR-7) + owner-gated KB-write actions capture/link (Phase 4a, FR-8) + voice-transcript
+capture & configurable post-session processing (Phase 4b, FR-9, #66).** Only `run_skill` (arbitrary
+headless exec from the orb) remains out of scope. Default OFF — no impact on other agents or the UI.
+See [feature-flows/brain-orb.md](feature-flows/brain-orb.md).
 
 - **FR-1 — First-party CSP-clean assets**: the orb ships as verbatim first-party frontend assets
   (`public/brain-orb/`), with `three`/`marked`/`DOMPurify`/font vendored locally and the inline
@@ -3498,13 +3498,26 @@ exec), automatic transcript capture, and headless-skill injection remain deferre
   route is the hard gate regardless. Own kill-switch `BRAIN_ORB_WRITE_ENABLED` (env, default OFF; distinct
   from `BRAIN_ORB_ENABLED` so writes disable without downing read/voice) → `brain_orb_write_available` in
   feature-flags. No DB change, no migration.
+- **FR-9 — Voice-transcript capture + configurable post-session processing (Phase 4b, #66)**: mirrors the
+  original `cornelius-internal/resources/agent-visualization/voice/` (client captures, agent renders/saves).
+  The mint adds `input_audio_transcription`/`output_audio_transcription` to the **locked** `LiveConnectConfig`,
+  so the constrained ephemeral token returns per-turn transcription. `voice.js` buffers input/output
+  transcription into conversation events (`session_start`/`user_turn`/`model_turn`/`tool_call`/`session_end`)
+  and, on `endConversation` (the correct flush seam — `onclose` early-returns on `wsClosedByUs`), relays them
+  to `orb.js`, which POSTs `capture_transcript {session_id, events, process}` (session-id = `Idempotency-Key`
+  → a double session-end saves one transcript). The `action` hook renders a markdown transcript into
+  `resources/inbox/Voice Conversations/` (ported `transcript_io`). **Post-session processing** (`process_transcript`,
+  or `capture_transcript {process:true}`): if the agent ships `~/.trinity/brain-orb/voice-postprocess.md` (the
+  "formulated prompt config" — configuring it is the opt-in), the hook runs that prompt over the transcript via
+  a **detached** `claude -p` (transcript piped on **stdin** — no shell string → no command injection), writing a
+  processed note. Owner-only (`OwnedAgentByName` + `ACTIONS.enabled`), body cap raised to 1 MiB (backend +
+  agent-server) for whole conversations. No DB change. **Confirmed on localhost**: constrained-token mint accepts
+  the transcription config, and synthetic voice events render + save; full live-audio transcription streaming is a
+  manual voice-session check.
 
-**Deferred to Phase 4b (trinity-enterprise#66)**: `run_skill` (headless `claude -p` exec) · automatic
-transcript-capture pipeline · headless-skill transcript injection · data-freshness/on-demand-refresh
-trigger · `data.json` caching/streaming. Split out during `/autoplan` (two independent reviews): the exec
-surface + transcript injection carry the prompt-injection risk and depend on an unproven Gemini-Live
-transcription path; 4b must inherit the #1083 detached-execution subsystem + a template.yaml allow-list
-ceiling + a transcription spike.
+**Still out of scope**: `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface
+with a `template.yaml` allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh
+issue if it's ever wanted. Also deferred: data-freshness/on-demand-refresh trigger · `data.json` caching/streaming.
 
 ---
 

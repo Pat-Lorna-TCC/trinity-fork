@@ -1257,6 +1257,17 @@ addEventListener('message', e=>{
   if(VOICE_DISPLAY_TOOLS.has(m.name)) pinned=true;   // hold it until the user takes over
   Promise.resolve(out).then(o=>{ try{ e.source.postMessage({type:'orb-tool-result', id:m.id, output:o}, '*'); }catch(_){ } });
 });
+// #66 — the voice tile relays its finished conversation (it never holds the JWT);
+// we POST it to the owner-gated broker as capture_transcript, with the session id as
+// the Idempotency-Key so a double session-end saves exactly ONE transcript. process:true
+// lets the agent run its configured post-session prompt (voice-postprocess.md) if present.
+addEventListener('message', e=>{
+  if(e.origin!==window.location.origin) return;   // same-origin voice iframe only
+  const m=e.data; if(!m || m.type!=='orb-capture-transcript') return;
+  if(!ACTIONS.enabled) return;   // only an owner with the write surface saves transcripts
+  postAction('capture_transcript', {session_id:m.session_id, events:m.events||[], process:true}, m.session_id)
+    .then(r=>{ if(r&&r.ok&&r.saved){ toast('voice transcript saved'); } });
+});
 // #60 Phase 3 — the voice tile (a nested iframe) never holds the platform JWT.
 // It asks US to mint a short-lived Gemini ephemeral token via the JWT-gated broker,
 // and we relay just the token back. The JWT stays in this page; the voice iframe
@@ -1436,11 +1447,11 @@ async function initActions(){
   const sb=$('skillBtns'); if(sb) sb.innerHTML='';
   if(ACTIONS.enabled){ try{ document.body.classList.add('brain-orb-write'); }catch(_){} }  // reveal capture/connect
 }
-async function postAction(type,args){
+async function postAction(type,args,idemKey){
   if(!ACTIONS.enabled){ toast('KB writes are not available for this agent'); return {error:'no backend'}; }
   try{
     const r=await fetch(VOICE_PROXY+'/action',{method:'POST',
-      headers:{'Content-Type':'application/json','Idempotency-Key':_idemKey(),...ORB_HEADERS},
+      headers:{'Content-Type':'application/json','Idempotency-Key':idemKey||_idemKey(),...ORB_HEADERS},
       body:JSON.stringify({action:type, ...(args||{})})});
     return await r.json();
   }catch(e){ return {error:String(e&&e.message||e)}; }

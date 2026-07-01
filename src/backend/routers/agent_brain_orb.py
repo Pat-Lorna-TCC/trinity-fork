@@ -41,12 +41,15 @@ router = APIRouter(prefix="/api/agents", tags=["brain-orb"])
 _AGENT_PORT = 8000
 _MAX_SCOPE_BODY = 64 * 1024
 _MAX_TOOL_BODY = 16 * 1024        # read-tool requests are tiny (a query + scope)
-_MAX_ACTION_BODY = 64 * 1024      # a capture note body / link pair is small
+# 1 MiB: capture/link bodies are tiny, but capture_transcript (#66) carries a whole
+# voice conversation's turn events. Owner-only + rate-limited, so a generous cap is safe.
+_MAX_ACTION_BODY = 1024 * 1024
 _NO_STORE = {"Cache-Control": "no-store"}
-# Phase 4a KB-write actions the backend accepts. run_skill + capture_transcript are
-# Phase 4b (trinity-enterprise#66) — rejected here so an unknown/deferred verb never
-# reaches the agent hook. Enum-validated at the boundary.
-_ALLOWED_ACTIONS = frozenset({"capture", "link"})
+# KB-write actions the backend accepts. capture/link (Phase 4a) + capture_transcript
+# and process_transcript (Phase 4b, trinity-enterprise#66 — save a voice transcript,
+# and run the agent's configured post-session prompt over it). run_skill remains out.
+# Enum-validated at the boundary so an unknown verb never reaches the agent hook.
+_ALLOWED_ACTIONS = frozenset({"capture", "link", "capture_transcript", "process_transcript"})
 # Owner-initiated capture/link burst budget per (user, agent, action). Generous — an
 # owner may jot several quick notes; distinct key per action so link doesn't starve capture.
 _ACTION_RATE_LIMIT = 30
@@ -220,11 +223,13 @@ async def post_brain_orb_action(
     current_user: CurrentUser,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    """Run an owner-gated KB-write action — **capture** (write a note) or **link**
-    (connect two notes) (#58 Phase 4a). **Owner/admin only.**
+    """Run an owner-gated KB-write action — **capture** (write a note), **link**
+    (connect two notes), **capture_transcript** (save a voice-session transcript),
+    or **process_transcript** (run the agent's configured post-session prompt over a
+    transcript). **Owner/admin only.**
 
-    The `action` verb is enum-validated at this boundary (run_skill + capture_transcript
-    are Phase 4b, trinity-enterprise#66 → 400 here, never reaching the agent hook).
+    The `action` verb is enum-validated at this boundary (`run_skill` remains out of
+    scope → 400 here, never reaching the agent hook).
     Body-capped (413), rate-limited per (user, agent, action), audit-logged, and
     deduped via `Idempotency-Key` (Invariant #18): a re-POST with the same key replays
     the stored result (`X-Idempotent-Replay: true`) without a second write; an in-flight
@@ -240,7 +245,7 @@ async def post_brain_orb_action(
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     action = payload.get("action") if isinstance(payload, dict) else None
     if action not in _ALLOWED_ACTIONS:
-        # run_skill / capture_transcript are deferred to Phase 4b (#66); anything else invalid.
+        # run_skill (arbitrary exec) remains out of scope; anything else invalid.
         raise HTTPException(status_code=400, detail="Unsupported action")
 
     # Idempotency FIRST (before rate limit) so a legit retry replays instead of 429ing.

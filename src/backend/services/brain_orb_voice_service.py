@@ -231,6 +231,11 @@ def _mint_sync(voice_name: str, system_instruction: str, can_write: bool) -> dic
             )
         ),
         tools=[tools],
+        # #61 Phase 4b — enable input/output transcription so the client receives
+        # per-turn text it can log for the saved transcript. Locked into the token
+        # (constrained path), mirroring the original Cornelius voice setup.
+        input_audio_transcription=genai_types.AudioTranscriptionConfig(),
+        output_audio_transcription=genai_types.AudioTranscriptionConfig(),
     )
     now = datetime.now(timezone.utc)
     expire_time = now + timedelta(seconds=VOICE_MAX_DURATION)
