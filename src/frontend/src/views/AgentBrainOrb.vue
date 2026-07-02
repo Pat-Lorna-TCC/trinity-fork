@@ -107,6 +107,12 @@ function sendInit() {
       // so the flag alone is the correct additional gate here. The mint route is
       // independently flag-gated (404), so this is UI-only.
       voiceAvailable: !!sessionsStore.brainOrbVoiceAvailable,
+      // #61 Phase 4a: gate the KB-write panel (capture/link) on the platform write
+      // flag. UI-only — the broker /action + /actions routes independently enforce
+      // the flag AND owner access, and orb.js only reveals the panel after GET
+      // /actions confirms owner + the agent's write hook. run_skill + transcript
+      // capture are Phase 4b (trinity-enterprise#66).
+      writeAvailable: !!sessionsStore.brainOrbWriteAvailable,
     },
     window.location.origin,        // pin target origin (same-origin iframe)
   )

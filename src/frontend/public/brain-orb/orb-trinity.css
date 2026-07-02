@@ -20,12 +20,13 @@
   src: url('./vendor/fonts/jetbrains-mono-500.woff2') format('woff2');
 }
 
-/* Deferred (KB-action) surfaces — hidden via !important so renderer toggles
- * (A key, dock chips) can't reveal a non-functional panel. KB WRITES are Phase 4.
- * #58 Phase 2: the scope panel (S) IS enabled (live mount/unmount → re-export),
- * so it is intentionally NOT hidden. */
-#actions,
-#inspActions {
+/* KB-action surfaces (capture · connect) — #61 Phase 4a. Enabled ONLY when the host
+ * set body.brain-orb-write, which orb.js adds after the broker confirms owner + write
+ * flag + the agent's action hook (GET /actions → 200). Without it the A key / dock chip
+ * can't reveal a non-functional panel. run_skill (exec) + transcript capture are Phase 4b
+ * (trinity-enterprise#66). #58 Phase 2: the scope panel (S) is separately enabled. */
+body:not(.brain-orb-write) #actions,
+body:not(.brain-orb-write) #inspActions {
   display: none !important;
 }
 
@@ -38,9 +39,9 @@ body:not(.brain-orb-voice) #voiceTile {
 
 /* Matching keyboard-hint rows in the controls legend: voice(2) / actions(11).
  * scope(8) stays visible now that scope control is live. The voice hint follows
- * the same gate as the tile. Markup is frozen (verbatim orb), so positional
- * selectors are stable. */
+ * the voice-tile gate; the actions hint follows the write-surface gate (#61 Phase 4a).
+ * Markup is frozen (verbatim orb), so positional selectors are stable. */
 body:not(.brain-orb-voice) #controls > div:nth-child(2),
-#controls > div:nth-child(11) {
+body:not(.brain-orb-write) #controls > div:nth-child(11) {
   display: none !important;
 }

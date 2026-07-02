@@ -262,6 +262,13 @@ BRAIN_ORB_ENABLED = os.getenv("BRAIN_ORB_ENABLED", "false").lower() == "true"
 # bool(GEMINI_API_KEY) (mirrors voice_available). Default OFF. The frontend hides
 # the voice tile unless this is on AND the agent has the `brain-orb` capability.
 BRAIN_ORB_VOICE_ENABLED = os.getenv("BRAIN_ORB_VOICE_ENABLED", "false").lower() == "true"
+# Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
+# capture/link actions. DISTINCT from BRAIN_ORB_ENABLED so the write/exec surface
+# has its own kill-switch that does NOT down the Phase-1 read path or the Phase-3
+# voice tile. Default OFF. The write routes 404 unless BRAIN_ORB_ENABLED AND this
+# are both on (and the caller owns the agent). `run_skill` + the transcript
+# pipeline are deferred to Phase 4b (trinity-enterprise#66).
+BRAIN_ORB_WRITE_ENABLED = os.getenv("BRAIN_ORB_WRITE_ENABLED", "false").lower() == "true"
 # VoIP-specific max call duration (seconds) — deliberately distinct from the
 # inherited 300s VOICE_MAX_DURATION so phone calls aren't silently cut at 5min.
 VOIP_MAX_CALL_DURATION = int(os.getenv("VOIP_MAX_CALL_DURATION", "600"))

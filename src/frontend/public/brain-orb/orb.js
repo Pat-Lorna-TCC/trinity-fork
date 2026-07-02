@@ -24,7 +24,7 @@ const TRINITY_EMBED = (() => {
     window.addEventListener('message', e => {
       if (e.origin !== window.location.origin) return;        // same-origin only
       const d = e.data; if (!d || d.type !== 'brain-orb:init') return;
-      finish({ agentName: d.agentName, apiBase: d.apiBase || '', authToken: d.authToken || '', voiceAvailable: !!d.voiceAvailable });
+      finish({ agentName: d.agentName, apiBase: d.apiBase || '', authToken: d.authToken || '', voiceAvailable: !!d.voiceAvailable, writeAvailable: !!d.writeAvailable });
     });
     try { window.parent.postMessage({ type: 'brain-orb:ready' }, window.location.origin); } catch (_) {}
     setTimeout(() => finish(null), 8000);                     // don't hang if no host answers
@@ -38,6 +38,7 @@ const TRINITY_EMBED = (() => {
 let ORB_HEADERS = {};
 let SCOPE_ENABLED = false;
 let VOICE_AVAILABLE = false;   // #60 Phase 3 — gates the client-held voice tile
+let WRITE_AVAILABLE = false;   // #61 Phase 4a — platform flag for the KB-write surface
 
 async function loadData(){
   if (window.AGENT_DATA) return window.AGENT_DATA;          // file:// safe
@@ -51,6 +52,10 @@ async function loadData(){
     // #60 Phase 3: un-hide the voice tile only when the host says voice is available
     // (platform flag + agent capability). orb-trinity.css keeps it hidden otherwise.
     if (ctx.voiceAvailable) { VOICE_AVAILABLE = true; try { document.body.classList.add('brain-orb-voice'); } catch(_){} }
+    // #61 Phase 4a: the KB-write surface is a platform flag here; initActions() only
+    // un-hides the action panel (body.brain-orb-write) after the broker confirms the
+    // caller owns the agent AND the agent ships a write hook (GET /actions → 200).
+    if (ctx.writeAvailable) { WRITE_AVAILABLE = true; }
     const r = await fetch(VOICE_PROXY + '/data', { headers: ORB_HEADERS });
     if (!r.ok) throw new Error('brain-orb data ' + r.status);
     return await r.json();
@@ -580,8 +585,7 @@ function highlightGroup(indices, frame){
   clusterLines.geometry.setAttribute('position',new THREE.BufferAttribute(new Float32Array(seg),3));
   clusterLines.visible=true;
   hoverIndex=indices[0]; hoverSet=indices.slice(0,12); if(hoverLines) hoverLines.visible=false; pinned=true;
-  if(frame){ const cen=new THREE.Vector3(); for(const i of indices) cen.add(NODES[i]._pos); cen.multiplyScalar(1/indices.length);
-    if(cen.length()>1) focusDir(cen,250); lastZoom=performance.now()/1000; }
+  if(frame) frameNodes(indices);   // #70 — fit the whole group (was a fixed focusDir(cen,250))
   return seg.length/6;
 }
 // isolate one KB domain: colour the orb by domain + light up that domain's nodes & their links
@@ -822,11 +826,37 @@ function focusDir(vec, dist){
   _dir.copy(vec).normalize(); qFocus.setFromUnitVectors(_dir,_front);
   focusing=true; camTargetDist=dist||205;
 }
+// #70 — fit-to-selection: center on the selection's centroid direction AND pick a
+// zoom distance that frames it, instead of the old fixed 195/250. A single note zooms
+// in to its shell; a spread-out cluster zooms out to fit its angular cap in the FOV.
+// (Camera sits at (0,0,camDist) looking at origin; focusDir rotates the target to front.)
+const _fcen=new THREE.Vector3(), _fp=new THREE.Vector3();
+function frameNodes(indices){
+  if(!indices || !indices.length) return;
+  _fcen.set(0,0,0); let n=0;
+  for(const i of indices){ const p=NODES[i]&&NODES[i]._pos; if(p){ _fcen.add(p); n++; } }
+  if(!n || _fcen.length()<1e-3) return;
+  _fcen.multiplyScalar(1/n);
+  const dir=_fcen.clone().normalize();
+  let theta=0, rMax=0;                                  // angular spread + farthest shell
+  for(const i of indices){ const p=NODES[i]&&NODES[i]._pos; if(!p) continue;
+    rMax=Math.max(rMax, p.length());
+    const a=_fp.copy(p).normalize().angleTo(dir); if(a>theta) theta=a; }
+  const fov=((camera.fov||45)*Math.PI/180);
+  const lateral=rMax*Math.sin(theta);                  // half-extent of the cap across view
+  const depth=rMax*Math.cos(theta);                    // near face of the cap
+  const fit=depth + (lateral/Math.tan(fov/2)) + 60;    // fit the cap vertically + margin
+  focusDir(dir, zclamp(Math.max(rMax+45, fit)));       // never inside the node shell
+  lastZoom=performance.now()/1000;
+}
 function focusNode(i){
   const nd=NODES[i]; if(!nd) return;
-  focusDir(nd._pos,195); showInspector(i); setHover(i);
+  showInspector(i); setHover(i);       // light up the node + its neighbours + draw the connecting edges
+  // #70/#71 — frame the node TOGETHER WITH its connected neighbours (setHover's
+  // hoverSet), so a just-made link's other endpoint is on-screen — not a lone node
+  // zoomed in while its connection sits off-frame.
+  frameNodes(hoverSet && hoverSet.length ? hoverSet : [i]);
   pinned=true;                         // keep the selection lit; a stray mouse move must not wipe it
-  lastZoom=performance.now()/1000;     // focusing stops the auto-rotation (resumes after idle)
   const h=nodePoints.geometry.attributes.aHeat; h.array[i]=1.0; h.needsUpdate=true;
   setTimeout(()=>{ h.array[i]=nd.heat||0; h.needsUpdate=true; },1700);
 }
@@ -1141,7 +1171,11 @@ const ORB_TOOLS={
   search_graph({query}){ return {matches: searchNodeIds(query,8).map(i=>NODES[i].title)}; },
   highlight_related_notes({topic}){ return highlightTopic(topic); },
   async navigate_to_note({title}){
-    const ids=searchNodeIds(title,1);
+    let ids=searchNodeIds(title,1);
+    // #71 — a just-created note may not be folded in yet (writes refresh on a debounce).
+    // If we miss AND an integration is pending, flush it now and retry before falling
+    // back to the vault — so "create X, now show me X" lands on the real graph node.
+    if(!ids.length && _refreshPending){ await refreshGraph('navigate-miss'); ids=searchNodeIds(title,1); }
     if(ids.length){ const i=ids[0]; focusNode(i);
       return {opened:true, in_view:true, title:NODES[i].title, layer:LAYER_NAME[NODES[i].layer],
               preview:(NODES[i].content||'').replace(/\s+/g,' ').trim().slice(0,300)}; }
@@ -1200,11 +1234,21 @@ const ORB_TOOLS={
     const text=(body||title||'').trim();
     if(!text) return {error:'nothing to capture'};
     const r=await postAction('capture',{title:title||'', body:text});
-    if(r&&r.ok){ addLiveNote(r.title||text.slice(0,60), text);   // show it as a persistent session cell
-      setState('ingesting'); setTimeout(()=>setState('idle'),3000);
+    if(r&&r.ok){ _pendingFocusTitle=r.title||text.slice(0,60);   // #72 — auto-select once integrated
+      scheduleRefresh();   // #67 — fold it into the real graph (debounced across a burst)
       return {ok:true, title:r.title, recorded_to:r.path,
-              note:'recorded to 00-Inbox; it will be wired into the graph at the next reindex — not connected yet'}; }
+              note:'recorded and being integrated into the graph — it will appear and be selected shortly'}; }
     return {error:(r&&r.error)||'capture failed'};
+  },
+  // #61 Phase 4a — voice-triggered link (owner sessions only; the write tools are in the
+  // locked manifest only when the minting user owns the agent). Connects two notes by title.
+  async link_notes({source, target}){
+    if(!ACTIONS.enabled) return {error:'the action backend is not available'};
+    if(!source||!target) return {error:'need both a source and a target note'};
+    const r=await postAction('link',{from:source, to:target});
+    if(r&&r.ok){ if(!r.already) scheduleRefresh();   // #67 — persist the edge into the real graph
+      return {ok:true, linked:[source, target], already:!!r.already}; }
+    return {error:(r&&r.error)||'link failed'};
   },
   // ---- scope tools: bring a book/company/research INTO view + into what the voice can search ----
   list_scopes(){ return {active:SCOPE_ACTIVE,
@@ -1236,12 +1280,24 @@ const ORB_TOOLS={
 const VOICE_DISPLAY_TOOLS=new Set(['navigate_to_note','highlight_related_notes','surface_tensions','list_hubs','list_converged_topics']);
 let pinned=false;   // a deliberate highlight (node/hub/search click · domain · tension · voice) is pinned — hover won't wipe it until the user takes over
 addEventListener('message', e=>{
+  if(e.origin!==window.location.origin) return;   // same-origin only — ORB_TOOLS now includes owner-gated writes (capture_note/link_notes), so don't dispatch cross-origin
   const m=e.data; if(!m || m.type!=='orb-tool' || !e.source) return;
   let out;
   try{ const fn=ORB_TOOLS[m.name]; out = fn ? fn(m.args||{}) : {error:'unknown tool '+m.name}; }
   catch(err){ out={error:String(err&&err.message||err)}; }
   if(VOICE_DISPLAY_TOOLS.has(m.name)) pinned=true;   // hold it until the user takes over
   Promise.resolve(out).then(o=>{ try{ e.source.postMessage({type:'orb-tool-result', id:m.id, output:o}, '*'); }catch(_){ } });
+});
+// #66 — the voice tile relays its finished conversation (it never holds the JWT);
+// we POST it to the owner-gated broker as capture_transcript, with the session id as
+// the Idempotency-Key so a double session-end saves exactly ONE transcript. process:true
+// lets the agent run its configured post-session prompt (voice-postprocess.md) if present.
+addEventListener('message', e=>{
+  if(e.origin!==window.location.origin) return;   // same-origin voice iframe only
+  const m=e.data; if(!m || m.type!=='orb-capture-transcript') return;
+  if(!ACTIONS.enabled) return;   // only an owner with the write surface saves transcripts
+  postAction('capture_transcript', {session_id:m.session_id, events:m.events||[], process:true}, m.session_id)
+    .then(r=>{ if(r&&r.ok&&r.saved){ toast('voice transcript saved'); } });
 });
 // #60 Phase 3 — the voice tile (a nested iframe) never holds the platform JWT.
 // It asks US to mint a short-lived Gemini ephemeral token via the JWT-gated broker,
@@ -1384,6 +1440,49 @@ async function setScope(tokens){
   }catch(e){ toast('scope change failed ('+(e.message||e)+')'); return {error:String(e&&e.message||e)}; }
   finally{ scopeBusy=false; sp&&sp.classList.remove('busy'); if(ld) ld.style.display='none'; }
 }
+// #66/#67 — close the write → reindex/re-export → refetch loop. After a capture/link
+// (or a manual refresh), ask the agent to fold new inbox notes/links into the graph,
+// then refetch /data and rebuild IN PLACE (same machinery as setScope). #68: a visible
+// "integrating…" state + a result toast so the user can confirm the write landed.
+let refreshBusy=false, _refreshTimer=null, _refreshPending=false;   // #67/#71 shared refresh state
+let _pendingFocusTitle=null;   // #72 — a just-created note to auto-select once the refresh folds it in
+async function refreshGraph(reason){
+  if(!VOICE_PROXY || !SCOPE_ENABLED) return {error:'no backend'};
+  if(refreshBusy || scopeBusy) return {error:'busy'};
+  _refreshPending=false; clearTimeout(_refreshTimer);   // consume any pending debounced refresh
+  // #72 — snapshot the selection BY ID before the rebuild (teardownGraph wipes
+  // lastInspectedIdx/hover and node indices change), so we can re-select it after.
+  const selId=(lastInspectedIdx!=null && NODES[lastInspectedIdx]) ? NODES[lastInspectedIdx].id : null;
+  const selGroup=(!selId && hoverSet && hoverSet.length>1)
+    ? hoverSet.map(j=>NODES[j] && NODES[j].id).filter(Boolean) : null;
+  refreshBusy=true; const ld=$('loading'); if(ld){ ld.textContent='integrating…'; ld.style.display=''; }
+  try{ setState('ingesting'); }catch(_){ }
+  try{
+    const r=await fetch(VOICE_PROXY+'/refresh',{method:'POST',headers:{...ORB_HEADERS}});
+    const res=await r.json();
+    if(res&&res.ok){
+      const an=res.added_nodes||0, ae=res.added_edges||0;
+      if(an||ae){   // #72 — rebuild ONLY when the graph actually changed (a no-op refresh keeps the selection)
+        const data=await (await fetch(VOICE_PROXY+'/data',{headers:ORB_HEADERS})).json();
+        applyData(data);
+        // #72 — after a write, auto-SELECT the just-created note (no need to ask again);
+        // otherwise restore the pre-refresh selection so a mid-task refresh doesn't deselect.
+        let focused=false;
+        if(_pendingFocusTitle){ const nids=searchNodeIds(_pendingFocusTitle,1);
+          if(nids.length){ focusNode(nids[0]); focused=true; } }
+        if(!focused){
+          if(selId!=null){ const ni=idIndex.get(selId); if(ni!=null) focusNode(ni); }
+          else if(selGroup && selGroup.length){ const idx=selGroup.map(id=>idIndex.get(id)).filter(v=>v!=null);
+            if(idx.length) highlightGroup(idx, true); }
+        }
+        toast('graph updated · +'+an+' notes, +'+ae+' links');
+      } else { toast('graph up to date'); }   // nothing new → no rebuild, selection intact
+      _pendingFocusTitle=null;   // consumed
+    } else { toast('refresh failed'+(res&&res.error?': '+res.error:'')); }
+    return res;
+  }catch(e){ toast('refresh failed ('+(e.message||e)+')'); return {error:String(e&&e.message||e)}; }
+  finally{ refreshBusy=false; if(ld) ld.style.display='none'; try{ setState('idle'); }catch(_){ } }
+}
 // tear down the per-build THREE objects + reset the collections buildGraph appends to,
 // so applyData can rebuild the scene in place (no reload → the voice socket survives)
 function teardownGraph(){
@@ -1403,26 +1502,31 @@ function applyData(data){
   setState('idle');
 }
 
-/* ============================ KB actions (capture · connect · run skill) ============================ */
-// All write/exec goes through the voice backend (proxy_server.py), token-gated. If the backend
-// isn't reachable (e.g. file://), actions stay disabled and the orb behaves exactly as before.
-const ACTIONS={enabled:false, token:null, skills:[]};
+/* ============================ KB actions (capture · connect) — #61 Phase 4a ============================ */
+// Owner-gated writes via the Trinity broker (POST /api/agents/{name}/brain-orb/action),
+// authed with the platform JWT (ORB_HEADERS) — NOT the old localhost proxy / X-Orb-Token.
+// The panel un-hides (body.brain-orb-write) only after the broker confirms owner + flag +
+// agent write hook. run_skill (exec) + transcript capture are Phase 4b (trinity-enterprise#66).
+const ACTIONS={enabled:false, skills:[]};
+// Fresh idempotency key per write attempt (Invariant #18): a client retry dedups at the
+// broker instead of double-writing. randomUUID is available same-origin (HTTPS/localhost).
+function _idemKey(){ try{ return crypto.randomUUID(); }catch(_){ return 'k'+Date.now()+Math.random().toString(36).slice(2); } }
 async function initActions(){
+  if(!WRITE_AVAILABLE || !VOICE_PROXY){ ACTIONS.enabled=false; return; }   // platform flag off / standalone
   try{
-    const r=await fetch(VOICE_PROXY+'/session',{signal:AbortSignal.timeout(2500)});
-    const d=await r.json();
-    if(d&&d.token){ ACTIONS.enabled=true; ACTIONS.token=d.token; ACTIONS.skills=d.skills||[]; }
-  }catch(e){ ACTIONS.enabled=false; }
-  const sb=$('skillBtns');
-  if(sb){ sb.innerHTML=ACTIONS.skills.map(s=>`<span class="sk" data-skill="${s}">${s}</span>`).join('');
-    sb.querySelectorAll('[data-skill]').forEach(b=>b.onclick=()=>runSkill(b.dataset.skill)); }
+    const r=await fetch(VOICE_PROXY+'/actions',{headers:ORB_HEADERS,signal:AbortSignal.timeout(6000)});
+    if(r.ok){ ACTIONS.enabled=true; }   // 200 ⇒ owner + write flag + agent ships the action hook
+  }catch(e){ ACTIONS.enabled=false; }   // 403 (non-owner) / 404 (flag off / no hook) / offline → stay hidden
+  ACTIONS.skills=[];                     // run_skill deferred to Phase 4b (#66) — no skill buttons in 4a
+  const sb=$('skillBtns'); if(sb) sb.innerHTML='';
+  if(ACTIONS.enabled){ try{ document.body.classList.add('brain-orb-write'); }catch(_){} }  // reveal capture/connect
 }
-async function postAction(type,args){
-  if(!ACTIONS.enabled){ toast('actions need the brain-orb servers (run /brain-orb)'); return {error:'no backend'}; }
+async function postAction(type,args,idemKey){
+  if(!ACTIONS.enabled){ toast('KB writes are not available for this agent'); return {error:'no backend'}; }
   try{
     const r=await fetch(VOICE_PROXY+'/action',{method:'POST',
-      headers:{'Content-Type':'application/json','X-Orb-Token':ACTIONS.token},
-      body:JSON.stringify({type,args})});
+      headers:{'Content-Type':'application/json','Idempotency-Key':idemKey||_idemKey(),...ORB_HEADERS},
+      body:JSON.stringify({action:type, ...(args||{})})});
     return await r.json();
   }catch(e){ return {error:String(e&&e.message||e)}; }
 }
@@ -1434,17 +1538,31 @@ function toggleActions(force){
   if(open){ if(!ACTIONS.enabled) setActStatus('backend offline — capture/skills disabled'); setTimeout(()=>$('capInput')&&$('capInput').focus(),50); }
 }
 $('actClose')&&($('actClose').onclick=()=>toggleActions(false));
+// #68 — visible manual "integrate & refresh" control (reindex + re-export + rebuild).
+$('refreshGraphBtn')&&($('refreshGraphBtn').onclick=()=>refreshGraph('manual'));
+// #67 — voice-created writes come in bursts; coalesce them into ONE rebuild a few
+// seconds after the last one so the orb isn't torn down mid-conversation per capture.
+// _refreshPending lets navigate_to_note flush the pending integration on a miss (#71).
+function scheduleRefresh(){ _refreshPending=true; clearTimeout(_refreshTimer);
+  _refreshTimer=setTimeout(()=>{ _refreshPending=false; refreshGraph('voice'); },4000); }
 
 /* --- capture a thought -> a note in 00-Inbox (the note lands now; it joins the graph at the next reindex) --- */
+// Re-entrancy guard: each postAction mints a fresh Idempotency-Key, so a double-click
+// would otherwise write two notes. Bounce the second click while one is in flight.
+let _capInFlight=false;
 async function doCapture(){
+  if(_capInFlight) return;
   const ta=$('capInput'); const body=(ta.value||'').trim();
   if(!body){ toast('type a thought first'); return; }
+  _capInFlight=true;
   setActStatus('capturing…',true);
-  const r=await postAction('capture',{body});
+  let r; try{ r=await postAction('capture',{body}); } finally { _capInFlight=false; }
   if(r&&r.ok){ ta.value=''; setActStatus(''); toggleActions(false);
     toast('captured → '+(r.title||'inbox').slice(0,40));
-    addLiveNote(r.title||body.split('\n')[0].slice(0,60), body);   // persistent, visible all session
-    setState('ingesting'); setTimeout(()=>setState('idle'),3500); }   // visual: a new signal streams in
+    // #67 — fold it into the actual graph so it appears as a real, connectable node.
+    // #72 — auto-select the new note once integrated (no separate "select it" step).
+    _pendingFocusTitle = r.title || body.split('\n')[0].slice(0,60);
+    refreshGraph('capture'); }
   else setActStatus('capture failed: '+((r&&r.error)||'?'));
 }
 $('capSave')&&($('capSave').onclick=doCapture);
@@ -1453,7 +1571,11 @@ $('capInput')&&$('capInput').addEventListener('keydown',e=>{
   e.stopPropagation();   // typing here must not fire orb hotkeys
 });
 
-/* --- run an allow-listed skill headlessly; poll the job, then reload to surface changes --- */
+/* --- run an allow-listed skill headlessly; poll the job, then reload to surface changes ---
+   Phase 4b (trinity-enterprise#66): DEFERRED. Kept for the follow-up but currently INERT —
+   ACTIONS.skills is [] (no skill buttons) and the voice manifest declares no run_skill tool,
+   so this is never invoked; the broker /action route rejects action=run_skill (400) and there
+   is no /job route in 4a. Wired up with the detached-execution rework in #66. */
 let jobTimer=null;
 async function runSkill(skill,args,reload=true){
   const r=await postAction('run_skill',{skill,args:args||''});
@@ -1529,7 +1651,8 @@ async function doLink(toIdx){
   if(toIdx===from.idx){ toast('cannot link a note to itself'); return; }
   const r=await postAction('link',{from:from.title, to:to.title});
   if(r&&r.ok){ addLiveEdge(from.idx,toIdx); registerLink(NODES[from.idx].id,to.id);
-    toast(r.already?'already linked':'linked → '+to.title.slice(0,26)); focusNode(from.idx); }
+    toast(r.already?'already linked':'linked → '+to.title.slice(0,26)); focusNode(from.idx);
+    if(!r.already) refreshGraph('link'); }   // #67 — persist the edge into the real graph
   else toast('link failed: '+((r&&r.error)||'?'));
 }
 $('iaConnect')&&($('iaConnect').onclick=startLink);

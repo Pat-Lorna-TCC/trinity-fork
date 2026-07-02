@@ -137,6 +137,7 @@ async def get_public_feature_flags(
         VOIP_ENABLED,
         BRAIN_ORB_ENABLED,
         BRAIN_ORB_VOICE_ENABLED,
+        BRAIN_ORB_WRITE_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
@@ -159,6 +160,13 @@ async def get_public_feature_flags(
         # voice_available). The frontend un-hides the voice tile only when this is on
         # AND the agent carries the `brain-orb` capability. Default OFF.
         "brain_orb_voice_available": BRAIN_ORB_VOICE_ENABLED and bool(GEMINI_API_KEY),
+        # Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
+        # capture/link. DISTINCT kill-switch from brain_orb_available so writes can be
+        # disabled without downing read/voice. UI-only hint (the write routes independently
+        # enforce the flag + owner gate); the orb only attempts initActions when on. The
+        # per-agent gate is still owner + the agent shipping a `brain-orb/action` hook.
+        # run_skill + the transcript pipeline are Phase 4b (#66). Default OFF.
+        "brain_orb_write_available": BRAIN_ORB_WRITE_ENABLED and BRAIN_ORB_ENABLED,
         # Pull-pilot routing for agent→agent MCP chat (#946) — default OFF.
         # Observability-only here: the routing gate is the MCP server's own read
         # of the same env var. Lets an operator confirm, via the API, whether the
