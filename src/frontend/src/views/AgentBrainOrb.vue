@@ -42,6 +42,7 @@
         src="/brain-orb/index.html"
         title="Brain Orb"
         class="absolute inset-0 w-full h-full border-0"
+        allow="microphone"
         @load="sendInit"
       />
 
@@ -79,10 +80,12 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useSessionsStore } from '../stores/sessions'
 import AgentAvatar from '../components/AgentAvatar.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()
+const sessionsStore = useSessionsStore()
 
 const agentName = route.params.name
 const agent = ref(null)
@@ -98,6 +101,18 @@ function sendInit() {
       agentName,
       apiBase: '',                 // same-origin — relative /api paths
       authToken: authStore.token || '',
+      // #60 Phase 3: gate the client-held voice tile on the platform voice flag.
+      // The per-agent `brain-orb` capability is already enforced by the route
+      // guard (router/index.js) — this page never loads for a non-capable agent —
+      // so the flag alone is the correct additional gate here. The mint route is
+      // independently flag-gated (404), so this is UI-only.
+      voiceAvailable: !!sessionsStore.brainOrbVoiceAvailable,
+      // #61 Phase 4a: gate the KB-write panel (capture/link) on the platform write
+      // flag. UI-only — the broker /action + /actions routes independently enforce
+      // the flag AND owner access, and orb.js only reveals the panel after GET
+      // /actions confirms owner + the agent's write hook. run_skill + transcript
+      // capture are Phase 4b (trinity-enterprise#66).
+      writeAvailable: !!sessionsStore.brainOrbWriteAvailable,
     },
     window.location.origin,        // pin target origin (same-origin iframe)
   )

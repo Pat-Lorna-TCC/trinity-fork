@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
 
@@ -61,21 +62,27 @@ const routes = [
     },
   },
   {
-    // #58 (trinity-enterprise) — Brain Orb: capability-gated per-agent page.
-    // Route guard checks only the platform flag (mirrors AgentWorkspace); the
-    // per-agent capability gate lives in AgentDetail's visibleTabs so a deep
-    // link to a non-Cornelius agent loads but renders the empty state.
+    // #58/#60 (trinity-enterprise) — Brain Orb: capability-gated per-agent page.
+    // The guard enforces BOTH gates so the orb is NEVER launchable on a
+    // non-Cornelius agent (not even via a raw URL): the platform flag AND the
+    // per-agent `brain-orb` capability from template.yaml. A non-capable agent
+    // (or a stopped agent whose /info can't be read) redirects to AgentDetail.
     path: '/agents/:name/brain',
     name: 'AgentBrainOrb',
     component: () => import('../views/AgentBrainOrb.vue'),
     meta: { requiresAuth: true },
     beforeEnter: async (to, from, next) => {
       const sessionsStore = useSessionsStore()
+      const authStore = useAuthStore()
       await sessionsStore.loadFeatureFlags()
-      if (!sessionsStore.brainOrbAvailable) {
-        next({ name: 'AgentDetail', params: { name: to.params.name } })
-      } else {
-        next()
+      const bail = () => next({ name: 'AgentDetail', params: { name: to.params.name } })
+      if (!sessionsStore.brainOrbAvailable) return bail()
+      try {
+        const r = await axios.get(`/api/agents/${to.params.name}/info`, { headers: authStore.authHeader })
+        const caps = Array.isArray(r.data?.capabilities) ? r.data.capabilities : []
+        return caps.includes('brain-orb') ? next() : bail()
+      } catch (_) {
+        return bail()
       }
     },
   },
