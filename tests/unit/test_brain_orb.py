@@ -935,3 +935,244 @@ def test_agent_server_action_body_too_large_413(agent_env):
     r = agent_env.client.post("/api/brain-orb/action",
                               json={"action": "capture", "body": "x" * 1_100_000})
     assert r.status_code == 413
+
+
+# ==========================================================================
+# Coverage gaps closed 2026-07-02 (/update-tests review)
+# ==========================================================================
+
+# --- backend: the Phase-2 mutating route gets the same owner-gate proof its
+# --- Phase-4 siblings have (incomplete-fix-chain escape class) ---------------
+
+def test_scope_post_owner_gate_403(client):
+    """POST /scope is OwnedAgentByName like every other mutating brain-orb route —
+    a non-owner gets 403 before any agent call (only the Phase-4 routes had this)."""
+    _deny_owner(client)
+    agent_req = AsyncMock()
+    with patch.object(bo, "_agent_request", agent_req):
+        r = client.post(_SCOPE_URL, json={"tokens": ["core"]})
+    assert r.status_code == 403
+    agent_req.assert_not_called()
+
+
+def test_postprocess_put_body_too_large_413(client):
+    """PUT /postprocess is capped at 64 KiB (review F4 — the small-config cap, not
+    the 1 MiB transcript cap), rejected before any agent call."""
+    agent_req = AsyncMock()
+    with patch.object(bo, "_agent_request", agent_req):
+        r = client.put(_POSTPROC_URL, json={"enabled": True, "prompt": "x" * 70_000})
+    assert r.status_code == 413
+    agent_req.assert_not_called()
+
+
+# --- backend: idempotency semantics beyond the replay/409 happy paths --------
+
+def test_action_idempotency_key_folds_verb(client):
+    """The stored key folds the action verb (route docstring contract) — a client
+    reusing one Idempotency-Key across verbs must claim two distinct keys, so a
+    `link` can never replay a `capture` snapshot."""
+    from services.idempotency_service import IdempotencyDecision
+    fresh = IdempotencyDecision(enabled=True, replay=False, in_flight=False,
+                                scope="agent:cornelius", key="k")
+    with patch.object(bo, "_agent_request", AsyncMock(return_value=_resp(200, b'{"ok":true}'))), \
+         patch.object(bo.idempotency_service, "begin", return_value=fresh) as begin, \
+         patch.object(bo.idempotency_service, "complete"), \
+         patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        client.post(_ACTION_URL, json={"action": "capture", "body": "x"},
+                    headers={"Idempotency-Key": "k9"})
+        client.post(_ACTION_URL, json={"action": "link", "from": "A", "to": "B"},
+                    headers={"Idempotency-Key": "k9"})
+    keys = [c.args[1] for c in begin.call_args_list]
+    assert keys == ["brain_orb_action:capture:k9", "brain_orb_action:link:k9"]
+
+
+def test_action_agent_error_releases_idempotency_claim(client):
+    """An agent-side failure (502 map / 504 timeout) releases the in-flight claim so
+    a retry with the same key isn't wedged on 409 — only the 429 path was covered."""
+    from services.idempotency_service import IdempotencyDecision
+    fresh = IdempotencyDecision(enabled=True, replay=False, in_flight=False,
+                                scope="agent:cornelius", key="k")
+    cases = (
+        (AsyncMock(return_value=_resp(500)), 502),                                  # agent error
+        (AsyncMock(side_effect=HTTPException(status_code=504, detail="t")), 504),   # timeout
+    )
+    for agent_req, expected in cases:
+        with patch.object(bo, "_agent_request", agent_req), \
+             patch.object(bo.idempotency_service, "begin", return_value=fresh), \
+             patch.object(bo.idempotency_service, "fail") as fail, \
+             patch.object(bo.rate_limiter, "enforce"):
+            r = client.post(_ACTION_URL, json={"action": "capture", "body": "x"},
+                            headers={"Idempotency-Key": "k"})
+        assert r.status_code == expected
+        fail.assert_called_once_with(fresh)
+
+
+def test_action_success_completes_claim_with_snapshot(client):
+    """A successful write completes the claim with the PARSED agent response, so a
+    later replay serves the real snapshot (not None / raw bytes)."""
+    from services.idempotency_service import IdempotencyDecision
+    fresh = IdempotencyDecision(enabled=True, replay=False, in_flight=False,
+                                scope="agent:cornelius", key="k")
+    with patch.object(bo, "_agent_request", AsyncMock(return_value=_resp(200, b'{"ok":true,"title":"t"}'))), \
+         patch.object(bo.idempotency_service, "begin", return_value=fresh), \
+         patch.object(bo.idempotency_service, "complete") as complete, \
+         patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_ACTION_URL, json={"action": "capture", "body": "x"},
+                        headers={"Idempotency-Key": "k"})
+    assert r.status_code == 200
+    complete.assert_called_once_with(fresh, None, {"ok": True, "title": "t"})
+
+
+def test_action_without_idempotency_key_skips_dedup(client):
+    """No Idempotency-Key header ⇒ begin() gets key=None (dedup disabled, Invariant
+    #18 fail-open) and the write still executes normally."""
+    with patch.object(bo, "_agent_request", AsyncMock(return_value=_resp(200, b'{"ok":true}'))), \
+         patch.object(bo.idempotency_service, "begin",
+                      wraps=bo.idempotency_service.begin) as begin, \
+         patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_ACTION_URL, json={"action": "capture", "body": "x"})
+    assert r.status_code == 200
+    assert begin.call_args.args[1] is None
+
+
+# --- backend: audit sink failure never masks a completed write (review F5) ---
+
+def test_action_audit_failure_never_masks_write(client):
+    """A failing audit sink must not 500 a COMPLETED write — the client would retry
+    with a fresh idempotency key and double-write (review F5, _safe_audit)."""
+    with patch.object(bo, "_agent_request", AsyncMock(return_value=_resp(200, b'{"ok":true}'))), \
+         patch.object(bo.platform_audit_service, "log",
+                      AsyncMock(side_effect=RuntimeError("audit sink down"))):
+        r = client.post(_ACTION_URL, json={"action": "capture", "body": "x"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_refresh_audit_failure_never_masks(client):
+    """Same F5 guarantee on the refresh route (its own _safe_audit call site)."""
+    with patch.object(bo, "_agent_request", AsyncMock(return_value=_resp(200, b'{"ok":true}'))), \
+         patch.object(bo.platform_audit_service, "log",
+                      AsyncMock(side_effect=RuntimeError("audit sink down"))):
+        r = client.post(_REFRESH_URL)
+    assert r.status_code == 200
+
+
+# --- agent-server: _run_hook hardening branches never exercised --------------
+
+def test_agent_server_hook_output_too_large_502(agent_env, monkeypatch):
+    """A hook flooding stdout past _MAX_HOOK_OUT → 502, never buffered through
+    (cap shrunk so the test stays fast)."""
+    monkeypatch.setattr(agent_env.asbo, "_MAX_HOOK_OUT", 1024)
+    _write_hook(agent_env.scopes_hook, '#!/usr/bin/env python3\nprint("a" * 2048)\n')
+    r = agent_env.client.get("/api/brain-orb/scopes")
+    assert r.status_code == 502
+
+
+def test_agent_server_hook_not_executable_404(agent_env):
+    """A hook file that exists but lacks +x is 'not supported' (404, the _hook_ready
+    branch) — never a 5xx from trying to exec it."""
+    agent_env.scopes_hook.write_text('#!/bin/sh\necho "{}"\n')  # deliberately no chmod
+    r = agent_env.client.get("/api/brain-orb/scopes")
+    assert r.status_code == 404
+
+
+def test_agent_server_scope_body_too_large_413(agent_env):
+    """The agent-server enforces its own 64 KiB _MAX_HOOK_BODY on /scope (defense in
+    depth below the backend cap; only /action's 1 MiB cap was tested)."""
+    _write_hook(agent_env.scope_hook, '#!/bin/sh\ncat >/dev/null\necho "{}"\n')
+    r = agent_env.client.post("/api/brain-orb/scope", json={"tokens": ["x" * 70_000]})
+    assert r.status_code == 413
+
+
+def test_agent_server_search_body_too_large_413(agent_env):
+    _write_hook(agent_env.search_hook, '#!/bin/sh\ncat >/dev/null\necho "{}"\n')
+    r = agent_env.client.post("/api/brain-orb/tool", json={"query": "x" * 70_000})
+    assert r.status_code == 413
+
+
+# --- agent-server: postprocess config semantics (#73) ------------------------
+
+def test_agent_server_postprocess_put_invalid_json_400(agent_env):
+    r = agent_env.client.put("/api/brain-orb/postprocess", data=b"{not json",
+                             headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_agent_server_postprocess_prompt_truncated_8000(agent_env):
+    """The stored prompt is hard-capped at 8000 chars on write — both the PUT echo
+    and the subsequent GET reflect the truncation."""
+    r = agent_env.client.put("/api/brain-orb/postprocess",
+                             json={"enabled": True, "prompt": "p" * 9000})
+    assert r.status_code == 200
+    assert len(r.json()["prompt"]) == 8000
+    g = agent_env.client.get("/api/brain-orb/postprocess")
+    assert len(g.json()["prompt"]) == 8000
+
+
+def test_agent_server_postprocess_md_fallback(agent_env):
+    """Legacy voice-postprocess.md is a prompt-only read fallback when no JSON config
+    exists — enabled derives from the prompt being non-empty."""
+    agent_env.asbo._POSTPROCESS_MD.write_text("summarize the session\n")
+    g = agent_env.client.get("/api/brain-orb/postprocess")
+    assert g.status_code == 200
+    assert g.json() == {"enabled": True, "prompt": "summarize the session"}
+
+
+def test_agent_server_postprocess_corrupt_json_degrades(agent_env):
+    """A corrupt JSON config never 500s — GET falls through to the .md fallback and
+    then to safe defaults."""
+    agent_env.asbo._POSTPROCESS_CONFIG.write_text("{corrupt")
+    g = agent_env.client.get("/api/brain-orb/postprocess")
+    assert g.status_code == 200
+    assert g.json() == {"enabled": False, "prompt": ""}
+
+
+# --- mint service: system instruction + token windows ------------------------
+
+def test_build_system_instruction_clauses_and_prompt_cap():
+    """readonly vs write clause selection; the persisted agent voice prompt is
+    prefixed and hard-capped at _AGENT_PROMPT_MAX; whitespace-only prompt ignored."""
+    import services.brain_orb_voice_service as svc
+
+    ro = svc._build_system_instruction(None, can_write=False)
+    rw = svc._build_system_instruction(None, can_write=True)
+    assert ro.endswith(svc._ORB_VOICE_READONLY_CLAUSE)
+    assert rw.endswith(svc._ORB_VOICE_WRITE_CLAUSE)
+    assert svc._ORB_VOICE_WRITE_CLAUSE not in ro
+
+    long_prompt = "p" * (svc._AGENT_PROMPT_MAX + 500)
+    out = svc._build_system_instruction(long_prompt, can_write=False)
+    prefix, sep, rest = out.partition("\n\n")
+    assert sep == "\n\n"
+    assert prefix == "p" * svc._AGENT_PROMPT_MAX   # capped, prompt-injection bloat bound
+    assert rest == ro
+
+    assert svc._build_system_instruction("   ", can_write=False) == ro
+
+
+def test_mint_service_new_session_window_shorter_than_expiry(monkeypatch):
+    """The token must be SPENT (session opened) within the short new-session window
+    even though the session itself may run VOICE_MAX_DURATION — a leaked token that
+    isn't used almost immediately is dead."""
+    import services.brain_orb_voice_service as svc
+    captured = {}
+
+    class _FakeAuthTokens:
+        def create(self, *, config):
+            captured["config"] = config
+            return types.SimpleNamespace(name="auth_tokens/t")
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            self.auth_tokens = _FakeAuthTokens()
+
+    monkeypatch.setattr(svc, "_client", None)
+    monkeypatch.setattr(svc, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(svc.genai, "Client", _FakeClient)
+
+    asyncio.run(svc.mint_voice_token("cornelius", voice_name="Kore", agent_prompt=None))
+    cfg = captured["config"]
+    # Both stamps derive from the same `now`, so the delta is exact.
+    delta = (cfg.expire_time - cfg.new_session_expire_time).total_seconds()
+    assert delta == svc.VOICE_MAX_DURATION - svc._NEW_SESSION_WINDOW_SECONDS
+    assert cfg.new_session_expire_time < cfg.expire_time
