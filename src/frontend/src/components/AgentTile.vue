@@ -186,8 +186,15 @@ const githubRepoShort = computed(() => {
   const repo = props.agent.github_repo
   if (!repo) return null
   if (repo.startsWith('github:')) return repo.substring(7)
-  if (repo.includes('github.com/')) {
-    return repo.split('github.com/')[1].replace(/\.git$/, '')
+  // URL form: extract owner/repo via a real hostname check, not a substring
+  // match (CodeQL js/incomplete-url-substring-sanitization).
+  try {
+    const url = new URL(repo)
+    if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
+      return url.pathname.replace(/^\//, '').replace(/\.git$/, '')
+    }
+  } catch {
+    // not a URL — plain "owner/repo" falls through
   }
   return repo
 })
