@@ -1,6 +1,13 @@
 {
   "test_files": [
     {
+      "file": "unit/test_85_brain_orb_settings.py",
+      "feature": "trinity-enterprise#85",
+      "added": "2026-07-04",
+      "categories": ["backend", "unit", "settings", "brain-orb", "feature-flags"],
+      "description": "Admin-configurable Brain Orb flags (trinity-enterprise#85): _resolve_bool_flag order (stored wins both directions, env opt-in, default OFF, junk-value fail-safe, fail-open on DB error), GET/PUT /api/settings/brain-orb (per-flag source, partial update, clear revert-to-env, set+clear conflict 400, 403 non-admin, audit old→new, /{key} route ordering), generic PUT/DELETE compatibility, brain-orb route gate honoring a real DB flip without restart, and feature-flags composition (voice = base ∧ voice ∧ key; 200 despite brain-orb DB failure)."
+    },
+    {
       "file": "unit/test_1332_cancelled_activity_state.py",
       "feature": "#1332",
       "added": "2026-06-26",

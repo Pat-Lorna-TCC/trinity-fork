@@ -682,12 +682,20 @@ Trinity reads/renders + brokers control. Default OFF — no impact on other agen
   subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards); **404 when the
   hook is absent**. Trinity never runs `export_data.py` itself — the agent owns generation +
   scope state (Invariant #8).
-- Platform flags: `brain_orb_available = BRAIN_ORB_ENABLED` (env, default OFF — static
-  render, no Gemini dependency); **`brain_orb_voice_available = BRAIN_ORB_VOICE_ENABLED &&
-  GEMINI_API_KEY`** (default OFF — Phase 3 voice tile, distinct because voice needs a Gemini
-  key). Voice frontend assets are CSP-clean (hand-rolled Gemini client, externalized
-  `voice/voice.js`, same-origin `voice/mic-worklet.js`; `connect-src` already allows `wss:`).
-  No DB change, no migration, no new secret.
+- Platform flags (**runtime-resolved, admin-configurable — trinity-enterprise#85**): the three
+  flags resolve at request time via `settings_service.is_brain_orb_enabled()` /
+  `..._voice_enabled()` / `..._write_enabled()` — `system_settings` row (wins in both
+  directions) → `BRAIN_ORB_*` env var as opt-in fallback → default OFF (one shared
+  `_resolve_bool_flag` helper; fail-open on a settings-read failure; deliberately uncached,
+  #506 `--workers 2` rationale). **Precedence note:** once a stored row exists the env var is
+  ignored until the override is cleared (`PUT /api/settings/brain-orb {clear: [...]}` or
+  generic `DELETE /api/settings/{key}`). Compositions: `brain_orb_available = base`;
+  `brain_orb_voice_available = base && voice && GEMINI_API_KEY` (key stays env-only — secret);
+  `brain_orb_write_available = base && write`; the voice-token mint route gates on
+  `base && voice` too. Admin surface: `GET/PUT /api/settings/brain-orb` (Settings → General
+  panel with per-flag source display). Voice frontend assets are CSP-clean (hand-rolled Gemini
+  client, externalized `voice/voice.js`, same-origin `voice/mic-worklet.js`; `connect-src`
+  already allows `wss:`). No DB change, no migration, no new secret.
 
 ---
 
@@ -745,7 +753,7 @@ Trinity reads/renders + brokers control. Default OFF — no impact on other agen
 | GET | `/api/agents/{name}/brain-orb/data` | Read-only proxy of the agent's Brain Orb `data.json` (`AuthorizedAgentByName`; byte pass-through; 404 when flag off / no export, 503/504 unreachable, 502 agent error). See [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58) |
 | GET | `/api/agents/{name}/brain-orb/scopes` | List the agent's selectable + active vault scopes for the orb scope panel (`AuthorizedAgentByName`; 404 when unsupported). (#58 Phase 2) |
 | POST | `/api/agents/{name}/brain-orb/scope` | Mutate the active scope set → agent re-export (**`OwnedAgentByName`** — owner/admin; body-capped; 404 when unsupported). (#58 Phase 2) |
-| POST | `/api/agents/{name}/brain-orb/voice-token` | Mint a short-lived, config-locked Gemini Live **ephemeral token** for the client-held voice tile (`AuthorizedAgentByName`; per-(user,agent) rate-limited; 404 when `BRAIN_ORB_VOICE_ENABLED` off, 503 no key, 502 mint error). Response field `ephemeral_token`. (#60 Phase 3) |
+| POST | `/api/agents/{name}/brain-orb/voice-token` | Mint a short-lived, config-locked Gemini Live **ephemeral token** for the client-held voice tile (`AuthorizedAgentByName`; per-(user,agent) rate-limited; 404 when the runtime-resolved base or voice flag is off (#85), 503 no key, 502 mint error). Response field `ephemeral_token`. (#60 Phase 3) |
 | POST | `/api/agents/{name}/brain-orb/tool` | Read-only KB search — proxies to the agent's `~/.trinity/brain-orb/search` hook (`AuthorizedAgentByName`; 404 when unsupported). (#60 Phase 3) |
 | GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
 | POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
@@ -946,10 +954,11 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/settings/mcp-url` | Get (any auth user) / set / reset-to-auto-detect (admin-only) MCP server URL |
-| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (`BRAIN_ORB_ENABLED`, default OFF; gates the Brain Orb page — #58), `brain_orb_voice_available` (`BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY`, default OFF; gates the client-held voice tile — #60), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
+| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (runtime-resolved: `system_settings` override → `BRAIN_ORB_ENABLED` env opt-in → OFF; gates the Brain Orb page — #58/#85), `brain_orb_voice_available` (`base && voice && GEMINI_API_KEY`, all but the key runtime-resolved, default OFF; gates the client-held voice tile — #60/#85), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
 | GET/PUT | `/api/settings/agent-defaults/resources` | Fleet-wide default CPU/memory for new containers (admin-only; CPU 1/2/4/8/16, memory 1g–32g) (RES-001) |
 | GET/PUT | `/api/settings/agent-defaults/access-policy` | Fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON** (code fallback when unset — no migration); seeds `agent_ownership.require_email` at creation (`register_agent_owner`) for **new** agents only, never rewrites existing rows; owners still override per agent via `PUT /api/agents/{name}/access-policy` |
 | GET/PUT | `/api/settings/max-parallel-tasks-ceiling` | Fleet-wide ceiling on per-agent `max_parallel_tasks` (admin-only, #506). Returns `{value, default, min, max}`; PUT range-validated 1–32 (400 otherwise), audit-logged. Stored in `system_settings` (no migration). The generic catch-all `PUT /{key}` is blocked for this key (422 → dedicated route). Clamp is runtime/clamp-on-use — see [Capacity & Backlog](#capacity--backlog-428) |
+| GET/PUT | `/api/settings/brain-orb` | Brain Orb platform flags (admin-only, trinity-enterprise#85). GET: per-flag `{value, source: override\|env\|default}` + `gemini_key_configured` (boolean only — never the key). PUT: partial booleans (`enabled`/`voice_enabled`/`write_enabled`) and/or `clear: [flag,…]` reverting a flag to its env/default (400 on unknown name or set+clear conflict); audit-logged with per-flag old→new. Stored in `system_settings` (no migration); route gates resolve at request time — no restart. Registered before `/{key}` (Invariant #4) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) |
 
 ### Session Tab
 | Method | Path | Description |
