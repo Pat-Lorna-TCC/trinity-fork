@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-04 | #1018 | fix(nevermined): settlement-ordering — honest `success_unsettled` on settle-fail (was lying `"success"`); `Idempotency-Key` on the paid boundary keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-replay / unsettled-re-drive-converge; `/retry-settlement` stub → honest 501. Tier 2 durable retry split to a follow-up | [nevermined-payments.md](feature-flows/nevermined-payments.md), [effect-idempotency.md](feature-flows/effect-idempotency.md) |
 | 2026-07-04 | #186 | fix(security): close user & agent enumeration oracles — uniform 404 across the agent-access dependency family + router sweep + Tier-4 GETs; identical email-request body/status/timing; MCP `checkAgentAccess` uniform reason + owner-username removal (pentest 3.3.3) | [email-authentication.md](feature-flows/email-authentication.md), [agent-permissions.md](feature-flows/agent-permissions.md) |
 | 2026-07-04 | #1444 | fix(chat): fail-loud + owner-gated `/task` chat-session persistence (no silent swallow, IDOR fix, SUCCESS-guarded) + fast unit regression guard | [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md) |
 | 2026-07-04 | #1446 | fix(canary): stop B-01 queue-status coherence false-firing under full-suite load — canary tests own the `database` dep (temp-DB stub via `get_engine`) + first end-to-end B-01 coverage (test-only) | [architecture.md](architecture.md) |
