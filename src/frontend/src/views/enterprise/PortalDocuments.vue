@@ -11,6 +11,22 @@
         <button class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl leading-none" @click="$emit('close')" aria-label="Close">×</button>
       </div>
 
+      <!-- Send a file to the agent -->
+      <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+        <label
+          class="flex items-center justify-center gap-2 text-sm rounded-lg border border-dashed border-gray-300 dark:border-gray-700 px-3 py-2 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800"
+          :class="uploading ? 'opacity-60 pointer-events-none' : ''"
+        >
+          <span>{{ uploading ? 'Sending…' : '⬆️ Send a file to ' + agent.name }}</span>
+          <input type="file" class="hidden" @change="onUpload" :disabled="uploading" />
+        </label>
+        <p v-if="uploadMsg" :class="[
+          'mt-2 text-xs',
+          uploadMsg.type === 'error' ? 'text-status-danger-600 dark:text-status-danger-400'
+                                     : 'text-status-success-600 dark:text-status-success-400'
+        ]">{{ uploadMsg.text }}</p>
+      </div>
+
       <div class="flex-1 overflow-y-auto p-4">
         <div v-if="loading" class="text-center py-12">
           <div class="animate-spin rounded-full h-7 w-7 border-b-2 border-action-primary-500 mx-auto"></div>
@@ -60,6 +76,24 @@ const store = useClientPortalStore()
 const docs = ref([])
 const loading = ref(true)
 const error = ref(null)
+const uploading = ref(false)
+const uploadMsg = ref(null)
+
+async function onUpload(ev) {
+  const file = ev.target.files && ev.target.files[0]
+  if (!file) return
+  uploading.value = true
+  uploadMsg.value = null
+  try {
+    const res = await store.uploadDocument(props.agent.name, file)
+    uploadMsg.value = { type: 'success', text: `Sent “${res.filename}” to ${props.agent.name}.` }
+  } catch (err) {
+    uploadMsg.value = { type: 'error', text: err.response?.data?.detail || 'Upload failed.' }
+  } finally {
+    uploading.value = false
+    ev.target.value = ''   // allow re-selecting the same file
+  }
+}
 
 function humanSize(n) {
   n = Number(n) || 0

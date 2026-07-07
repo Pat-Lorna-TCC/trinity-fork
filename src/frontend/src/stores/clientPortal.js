@@ -81,6 +81,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data.documents || []
     },
 
+    // Send a file TO a rostered agent (lands in its inbox). Multipart; let the
+    // browser set the boundary — only add the portal auth header.
+    async uploadDocument(agentName, file) {
+      const form = new FormData()
+      form.append('file', file)
+      const { data } = await axios.post(
+        `/api/enterprise/client-portal/agents/${agentName}/documents`,
+        form,
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     async fetchRoster() {
       this.loading = true
       this.error = null
