@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onMounted } from 'vue'
 import { useAgentsStore } from '@/stores/agents'
 import { renderMarkdown } from '@/utils/markdown'
 
@@ -76,12 +76,28 @@ const props = defineProps({
   // Pluggable send: (agentName, text) => Promise<{response, cost}>. Defaults to
   // the operator OSS chat; the public /portal passes the portal-session send.
   sendMessage: { type: Function, default: null },
+  // Optional history loader: (agentName) => Promise<[{role, content}]>. When
+  // provided (public /portal), the drawer restores the persisted conversation on
+  // open so it survives refresh/re-sign-in. Omitted on the operator preview page.
+  loadHistory: { type: Function, default: null },
 })
 defineEmits(['close'])
 
 const agentsStore = useAgentsStore()
 const doSend = props.sendMessage || agentsStore.sendChatMessage
 const messages = ref([])
+const loadingHistory = ref(false)
+
+onMounted(async () => {
+  if (!props.loadHistory) return
+  loadingHistory.value = true
+  try {
+    const hist = await props.loadHistory(props.agent.name)
+    messages.value = (hist || []).map(m => ({ role: m.role, content: m.content }))
+    await scrollDown()
+  } catch { /* best-effort; start with an empty thread */ }
+  finally { loadingHistory.value = false }
+})
 const input = ref('')
 const sending = ref(false)
 const error = ref(null)

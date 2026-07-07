@@ -81,6 +81,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data.documents || []
     },
 
+    // The client's persisted conversation with an agent (oldest-first) — so the
+    // chat survives a refresh / re-sign-in.
+    async fetchHistory(agentName) {
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/history`,
+        { headers: this.authHeader }
+      )
+      return data.messages || []
+    },
+
     // Files the client has sent to an agent (their inbox) — lets them review
     // what they uploaded.
     async fetchUploads(agentName) {

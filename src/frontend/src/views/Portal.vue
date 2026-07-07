@@ -122,6 +122,7 @@
       v-if="chatAgent"
       :agent="chatAgent"
       :send-message="(name, msg) => store.sendPortalChat(name, msg)"
+      :load-history="(name) => store.fetchHistory(name)"
       @close="chatAgent = null"
     />
 
