@@ -172,6 +172,46 @@ ASYNC_DISPATCH_ELIGIBLE_TRIGGERS = frozenset({"schedule", "webhook"})
 # can't drift.
 MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"
 
+# Correlated-Failure / Thundering-Herd Controls (#1085) — re-delivery governor.
+# These guard the live #1083 fire-and-forget callback path (and, unchanged, the
+# future pull-mode re-delivery path) against a fleet-wide retry storm: a backend
+# restart re-sends ~N persisted terminal envelopes plus in-flight callback
+# retries, all hammering POST /api/agents/{name}/executions/{id}/result.
+#
+# REDELIVERY_GOVERNOR_ENABLED is the single master switch for the BACKEND
+# controls (re-delivery rate caps + shared-cause pause reads). Default OFF — the
+# governor is inert until flipped, and a flip back is the whole rollback.
+# Agent-side jitter (Part A) is behaviorally safe and ships UNFLAGGED.
+# Everything here is fail-open: a Redis blip degrades to allow/no-op, never to
+# blocking or dropping a terminal.
+REDELIVERY_GOVERNOR_ENABLED = os.getenv("REDELIVERY_GOVERNOR_ENABLED", "false").lower() == "true"
+
+# Fleet-wide re-delivery cap (~10/s default) — bounds total callback admissions
+# across all agents over a rolling window.
+REDELIVERY_FLEET_LIMIT = int(os.getenv("REDELIVERY_FLEET_LIMIT", "600"))
+REDELIVERY_FLEET_WINDOW_SECONDS = int(os.getenv("REDELIVERY_FLEET_WINDOW_SECONDS", "60"))
+
+# Per-agent re-delivery cap — bounds one agent's callback admissions so a single
+# crash-looping agent can't exhaust the fleet budget.
+REDELIVERY_AGENT_LIMIT = int(os.getenv("REDELIVERY_AGENT_LIMIT", "20"))
+REDELIVERY_AGENT_WINDOW_SECONDS = int(os.getenv("REDELIVERY_AGENT_WINDOW_SECONDS", "60"))
+
+# Shared-cause detector: when this many DISTINCT agents post an AUTH/BILLING
+# terminal within the rolling window, a fleet-wide cause is inferred (Claude API
+# outage, expired platform key, a bad skill pushed fleet-wide) and re-delivery is
+# paused for the whole fleet.
+CORRELATED_FAILURE_THRESHOLD = int(os.getenv("CORRELATED_FAILURE_THRESHOLD", "20"))
+CORRELATED_FAILURE_WINDOW_SECONDS = int(os.getenv("CORRELATED_FAILURE_WINDOW_SECONDS", "120"))
+
+# Pause flag TTL — the pause auto-expires (no explicit unpause, so there is no
+# stuck-pause failure mode). Kept well under the lease window (timeout +
+# SLOT_TTL_BUFFER, buffer=300) so a held row is never failed during the pause.
+CORRELATED_PAUSE_TTL_SECONDS = int(os.getenv("CORRELATED_PAUSE_TTL_SECONDS", "300"))
+
+# Retry-After hint (seconds) returned on a 503 while paused/throttled — jittered
+# at the callsite so throttled callbacks don't realign on the same backoff edge.
+REDELIVERY_PAUSE_RETRY_AFTER_SECONDS = int(os.getenv("REDELIVERY_PAUSE_RETRY_AFTER_SECONDS", "30"))
+
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # Coalesce empty → default (#1076): os.getenv(name, default) returns the
@@ -184,6 +224,23 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
 VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
+
+# Per-agent voice selection (#28). Canonical set of Gemini Live prebuilt voices
+# offered by Trinity; the single source of truth shared by the persisted-voice
+# write validation and the read-path fallback (and mirrored by the frontend
+# picker). DEFAULT_VOICE_NAME is the historical hardcoded default and the
+# fallback for an unset or no-longer-valid persisted value.
+DEFAULT_VOICE_NAME = "Kore"
+GEMINI_VOICE_NAMES = ("Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir", "Gacrux")
+
+# Outbound voice messages across channels (epic #24). Shared TTS layer used by
+# the channel adapters (Telegram #25 first) to speak agent replies. ElevenLabs is
+# the provider; the key gates the whole feature (empty ⇒ voice-out unavailable,
+# adapters fall back to text). TTS_MAX_CHARS is the shared cost guardrail — a
+# reply longer than this is delivered as text instead of paying to synthesize it.
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"
+TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
 
 # Gemini text/audio models (#1130). Hardcoded `gemini-2.0-flash` was retired by
 # Google (404 NOT_FOUND) with no config escape hatch — these env overrides make
@@ -200,6 +257,13 @@ GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-
 # also requires a per-agent voip_bindings row to function. `voip_available`
 # in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
+# Brain Orb flags (trinity-enterprise#58/#60/#61) are RUNTIME-RESOLVED as of #85
+# — no import-time constants here, so a stale module value can never shadow an
+# admin toggle. Resolution lives in services/settings_service.py
+# (is_brain_orb_enabled / is_brain_orb_voice_enabled / is_brain_orb_write_enabled):
+# system_settings override → BRAIN_ORB_ENABLED / BRAIN_ORB_VOICE_ENABLED /
+# BRAIN_ORB_WRITE_ENABLED env opt-in → default OFF. Admin surface:
+# GET/PUT /api/settings/brain-orb.
 # VoIP-specific max call duration (seconds) — deliberately distinct from the
 # inherited 300s VOICE_MAX_DURATION so phone calls aren't silently cut at 5min.
 VOIP_MAX_CALL_DURATION = int(os.getenv("VOIP_MAX_CALL_DURATION", "600"))

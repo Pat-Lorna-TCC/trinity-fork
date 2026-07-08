@@ -12,18 +12,21 @@ Related routers (same /api/agents prefix):
 """
 import json
 import logging
+import random
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
-from pydantic import BaseModel
 
 from models import (
     AgentConfig,
     AgentStatus,
-    User,
-    DeployLocalRequest,
     CircuitBreakerConfigUpdate,
+    DeployLocalRequest,
     ExecutionResultEnvelope,
+    HeartbeatPayload,
+    McpExposedUpdate,
+    VoiceRepliesUpdate,
     TaskExecutionStatus,
+    User,
 )
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
@@ -770,22 +773,152 @@ async def set_circuit_breaker_endpoint(
         target_id=agent_name,
         details={"enabled": body.enabled},
     )
-    return {
+    result = {
         "agent_name": agent_name,
         "enabled": body.enabled,
         "global_enabled": bool(DISPATCH_BREAKER_ENABLED),
+    }
+    # #1491: the breaker is two-tier gated — turning the per-agent toggle on
+    # while the platform-wide DISPATCH_BREAKER_ENABLED flag is off saves the
+    # preference but does nothing. Surface a non-fatal advisory so the owner
+    # isn't caught by the "switch is on but nothing happens" trap. The write
+    # still succeeds; the stored preference applies once the global flag flips on.
+    if body.enabled and not DISPATCH_BREAKER_ENABLED:
+        result["warning"] = (
+            "Per-agent toggle saved, but the breaker stays inactive until the "
+            "platform-wide DISPATCH_BREAKER_ENABLED flag is enabled."
+        )
+    return result
+
+
+# ============================================================================
+# MCP Exposure Toggle (#846)
+# ============================================================================
+
+
+@router.get("/{agent_name}/mcp-exposed")
+async def get_mcp_exposed_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Whether the agent is exposed as a dedicated MCP tool (#846).
+
+    Returns the current flag plus the deterministic ``tool_name`` the MCP server
+    would register, resolved over the live exposed set so the name shown matches
+    the suffixed tool actually registered when another exposed agent shares the
+    same base slug (#846).
+    """
+    from services.agent_service.mcp_tool_names import resolve_tool_name
+
+    enabled = db.get_mcp_exposed(agent_name)
+    exposed_names = [a["agent_name"] for a in db.get_mcp_exposed_agents()]
+    return {
+        "agent_name": agent_name,
+        "enabled": enabled,
+        "tool_name": resolve_tool_name(agent_name, exposed_names),
+    }
+
+
+@router.put("/{agent_name}/mcp-exposed")
+async def set_mcp_exposed_endpoint(
+    agent_name: OwnedAgentByName,
+    body: McpExposedUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable exposing the agent as a dedicated MCP tool (#846). Owner-only.
+
+    Refuses the system agent (it already bypasses all permission checks). The MCP
+    server polls the internal endpoint and adds/removes the dedicated tool within
+    one poll interval — no MCP-server restart.
+    """
+    from services.agent_service.mcp_tool_names import resolve_tool_name
+
+    if db.is_system_agent(agent_name):
+        raise HTTPException(status_code=403, detail="Cannot expose the system agent via MCP")
+
+    db.set_mcp_exposed(agent_name, body.enabled)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="mcp_exposed_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled},
+    )
+    # Resolve over the now-current exposed set so the returned name reflects any
+    # collision suffix the MCP server will actually register (#846).
+    exposed_names = [a["agent_name"] for a in db.get_mcp_exposed_agents()]
+    return {
+        "agent_name": agent_name,
+        "enabled": body.enabled,
+        "tool_name": resolve_tool_name(agent_name, exposed_names),
+    }
+
+
+# ============================================================================
+# Outbound voice replies (TTS) — shared agent-level config (epic #24 / #25)
+# ============================================================================
+
+
+@router.get("/{agent_name}/voice-replies")
+async def get_voice_replies_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Shared per-agent outbound-voice config (epic #24 / #25).
+
+    Returns the toggle + configured ElevenLabs voice id, plus ``available`` —
+    whether the platform has TTS configured at all (``ELEVENLABS_API_KEY``) — so
+    the UI can show an inactive state instead of a dead toggle.
+    """
+    import services.tts_service as tts_service
+
+    cfg = db.get_tts_config(agent_name)
+    return {
+        "agent_name": agent_name,
+        "enabled": cfg["enabled"],
+        "voice_id": cfg["voice_id"],
+        "available": tts_service.is_available(),
+    }
+
+
+@router.put("/{agent_name}/voice-replies")
+async def set_voice_replies_endpoint(
+    agent_name: OwnedAgentByName,
+    body: VoiceRepliesUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable spoken replies and set the ElevenLabs voice id (owner-only).
+
+    Enabling requires a ``voice_id``. When on, channel adapters (Telegram first)
+    speak replies via the shared TTS service, falling back to text on any failure
+    or when the reply exceeds the shared cost cap.
+    """
+    if body.enabled and not body.voice_id:
+        raise HTTPException(status_code=400, detail="voice_id is required to enable voice replies")
+
+    db.set_tts_config(agent_name, body.enabled, body.voice_id)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="voice_replies_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled, "has_voice_id": bool(body.voice_id)},
+    )
+    cfg = db.get_tts_config(agent_name)
+    return {
+        "agent_name": agent_name,
+        "enabled": cfg["enabled"],
+        "voice_id": cfg["voice_id"],
     }
 
 
 # ============================================================================
 # Heartbeat Endpoint (RELIABILITY-004 / #307)
 # ============================================================================
-
-class HeartbeatPayload(BaseModel):
-    """Lightweight liveness payload POSTed by the agent every ~5s."""
-    memory_mb: Optional[float] = None
-    active_executions: Optional[int] = None
-    uptime_s: Optional[float] = None
 
 
 @router.post("/{agent_name}/heartbeat")
@@ -847,6 +980,15 @@ _AUTHORITATIVE_TERMINALS = frozenset({
 # callback may finalize. Keeps the callback from terminal-writing a sync /
 # interactive execution the backend is mid-await on (Codex #3 / decision 2).
 _ASYNC_DISPATCH_MARKER = "dispatched_async"
+
+
+def _jittered_retry_after(base_seconds: int) -> int:
+    """A jittered Retry-After (seconds) for a paused/throttled callback (#1085).
+
+    Spreads ±50% around ``base`` so throttled agents don't realign on the same
+    backoff edge and re-storm in lockstep when the hint elapses. Floored at 1."""
+    base = max(1, int(base_seconds))
+    return max(1, int(random.uniform(base * 0.5, base * 1.5)))
 
 
 @router.post("/{agent_name}/executions/{execution_id}/result")
@@ -932,12 +1074,78 @@ async def agent_execution_result(
         if log_bytes > _MAX_CALLBACK_LOG_BYTES:
             raise HTTPException(status_code=413, detail="execution_log too large")
 
+    # ---- #1085 re-delivery governor: shared-cause pause + rate caps --------
+    # Master-flag gated (inert when OFF). Placed AFTER the replay-ACK (an
+    # already-final row still ACKs 200 while paused) and the marker-409 (a
+    # non-async row is still permanently rejected) so ONLY a legit accepted async
+    # terminal is ever throttled. Throttle/pause raises **503 + Retry-After**,
+    # NOT 429: 503 ∉ result_callback._PERMANENT_STATUSES, so a throttled callback
+    # stays persisted on disk and retries on its jittered backoff — the startup
+    # sweep and lease reaper remain the never-drop backstops. Fail-open:
+    # rate_limiter.check / is_paused degrade to allow on a Redis outage.
+    import config
+    if config.REDELIVERY_GOVERNOR_ENABLED:
+        from services import rate_limiter
+        from services.redelivery_governor import get_redelivery_governor
+
+        if get_redelivery_governor().is_paused():
+            retry_after = _jittered_retry_after(config.REDELIVERY_PAUSE_RETRY_AFTER_SECONDS)
+            logger.warning(
+                "[#1085] result callback for %s held — fleet re-delivery paused (shared cause)",
+                execution_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Re-delivery paused (shared cause); retry later",
+                headers={"Retry-After": str(retry_after)},
+            )
+        fleet = rate_limiter.check(
+            "redelivery:fleet",
+            config.REDELIVERY_FLEET_LIMIT,
+            config.REDELIVERY_FLEET_WINDOW_SECONDS,
+        )
+        per_agent = rate_limiter.check(
+            f"redelivery:agent:{agent_name}",
+            config.REDELIVERY_AGENT_LIMIT,
+            config.REDELIVERY_AGENT_WINDOW_SECONDS,
+        )
+        if not fleet.allowed or not per_agent.allowed:
+            retry_after = max(fleet.retry_after, per_agent.retry_after, 1)
+            logger.warning(
+                "[#1085] result callback for %s throttled (fleet_ok=%s agent_ok=%s)",
+                execution_id, fleet.allowed, per_agent.allowed,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Re-delivery rate limit exceeded; retry later",
+                headers={"Retry-After": str(retry_after)},
+            )
+
     # ---- Build the normalized terminal + apply -----------------------------
-    status = (
-        TaskExecutionStatus.SUCCESS
-        if payload.status == "success"
-        else TaskExecutionStatus.FAILED
+    # #679: 3-way map — success→SUCCESS, cancelled→CANCELLED, everything else
+    # (incl. unknown forward-compat values) →FAILED. CANCELLED flows through
+    # apply_result (release_slot=True); the replay gate above already short-
+    # circuits a terminate-wrote-first CANCELLED row, and the reverse race
+    # (callback CANCELLED first) makes the later terminate write a CAS no-op.
+    #
+    # Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
+    # as a clean cancellation even when the agent labels it "cancelled". The
+    # agent side already guards this (result_callback._is_auth_or_rate), but the
+    # callback is the backend trust boundary — a buggy or mixed-version agent
+    # that POSTs status:"cancelled" carrying error_code:"auth" (or an auth/
+    # rate_limit terminal_reason) would otherwise silently dodge the AUTH
+    # dispatch breaker / SUB-003 auto-switch. Mirror the guard so the invariant
+    # ("auth/rate is never cancellation") holds regardless of the caller image.
+    is_auth_or_rate = (
+        payload.error_code == TaskExecutionErrorCode.AUTH.value
+        or payload.terminal_reason in ("auth", "rate_limit")
     )
+    if payload.status == "success":
+        status = TaskExecutionStatus.SUCCESS
+    elif payload.status == "cancelled" and not is_auth_or_rate:
+        status = TaskExecutionStatus.CANCELLED
+    else:
+        status = TaskExecutionStatus.FAILED
     error_code = None
     if payload.error_code:
         try:

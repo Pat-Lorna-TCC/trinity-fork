@@ -11,10 +11,8 @@ import os
 import secrets
 import httpx
 import logging
-from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from database import (
     db,
@@ -27,31 +25,18 @@ from database import (
     PublicChatMessage
 )
 from dependencies import get_current_user
-from models import User
+from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import (
+    build_public_channel_caller_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
-
-
-class PublicChatHistoryResponse(BaseModel):
-    """Response model for chat history endpoint."""
-    messages: List[dict]
-    session_id: str
-    message_count: int
-
-
-class ClearSessionResponse(BaseModel):
-    """Response model for clear session endpoint."""
-    cleared: bool
-    new_session_id: Optional[str] = None
-
 
 
 logger = logging.getLogger(__name__)
@@ -549,11 +534,16 @@ async def public_chat(
     if _pub_file_descs:
         context_prompt = f"{context_prompt}\n\n" + "\n".join(_pub_file_descs)
 
-    # Store user message (after context is built so it doesn't appear twice)
+    # Store user message (after context is built so it doesn't appear twice).
+    # #903: stamp the verified email as the message sender so the shared
+    # sender-filtered MEM-001 summarizer (which keys on the user's own turns)
+    # works on the web path identically to channels. None for anonymous
+    # sessions, which never summarize.
     db.add_public_chat_message(
         session_id=chat_session.id,
         role="user",
-        content=chat_request.message
+        content=chat_request.message,
+        sender_email=verified_email,
     )
 
     # Record usage
@@ -618,11 +608,19 @@ async def public_chat(
         triggered_by="public",
         source_user_email=source_email,
         timeout_seconds=900,
-        system_prompt=memory_system_prompt,
+        # #894: per-agent public-channel model override (None → platform default).
+        model=db.get_public_channel_model(agent_name),
+        # #1205: per-agent public/channel custom-instructions fragment.
+        system_prompt=build_public_channel_caller_prompt(
+            agent_name, memory_system_prompt
+        ),
         images=_pub_image_data,
     )
 
-    if result.status == "failed":
+    if result.status in ("failed", "cancelled"):
+        # #679: a CANCELLED turn is non-delivery, not a success-like empty
+        # response. It falls through to the generic 502 below (its error text
+        # matches no capacity/timeout branch) — the operator stopped the work.
         error = result.error or ""
         if "at capacity" in error:
             raise HTTPException(
@@ -643,12 +641,19 @@ async def public_chat(
 
     assistant_response = result.response
 
-    # Store assistant response in public chat messages
+    # Store assistant response in public chat messages.
+    # #903: a public-link session is always single-participant, so stamp the
+    # assistant turn with the same verified email as the user turn. The
+    # sender-filtered MEM-001 summarizer then keeps the assistant's replies in
+    # this user's summary (they were included pre-#903) while the shared
+    # multi-participant Slack thread — where the assistant turn stays null —
+    # is the only place the filter drops assistant context.
     db.add_public_chat_message(
         session_id=chat_session.id,
         role="assistant",
         content=assistant_response,
-        cost=result.cost
+        cost=result.cost,
+        sender_email=verified_email,
     )
 
     # MEM-001: Increment message count and trigger background summarization every 5 messages
@@ -936,16 +941,26 @@ async def _execute_public_chat_background(
             source_user_email=source_email,
             timeout_seconds=900,
             execution_id=execution_id,
-            system_prompt=memory_system_prompt,
+            # #894: per-agent public-channel model override (None → platform default).
+            model=db.get_public_channel_model(agent_name),
+            # #1205: per-agent public/channel custom-instructions fragment.
+            system_prompt=build_public_channel_caller_prompt(
+                agent_name, memory_system_prompt
+            ),
             images=images or [],
         )
 
         if result.status == "success" and result.response:
+            # #903: single-participant web session — stamp the assistant turn
+            # with the verified email (mirror the sync path) so the
+            # sender-filtered summarizer keeps assistant replies in this user's
+            # memory.
             db.add_public_chat_message(
                 session_id=chat_session_id,
                 role="assistant",
                 content=result.response,
-                cost=result.cost
+                cost=result.cost,
+                sender_email=verified_email,
             )
 
             # MEM-001: Increment message count and trigger background summarization every 5 messages
@@ -957,8 +972,10 @@ async def _execute_public_chat_background(
                         user_email=verified_email,
                         session_id=chat_session_id,
                     ))
-        elif result.status == "failed":
-            logger.error(f"[PublicChatAsync] Task failed for {agent_name}: {result.error}")
+        elif result.status in ("failed", "cancelled"):
+            # #679: non-delivery — only a SUCCESS turn with a response is posted
+            # to the public session above; a cancelled turn writes nothing.
+            logger.info(f"[PublicChatAsync] Task {result.status} for {agent_name}: {result.error}")
     except Exception as e:
         logger.error(f"[PublicChatAsync] Background execution error for {agent_name}: {e}")
 
@@ -1047,8 +1064,11 @@ async def public_execution_status(
     return {
         "execution_id": execution.id,
         "status": execution.status,
-        "response": execution.response if execution.status in ("success", "failed") else None,
-        "error": execution.error if execution.status == "failed" else None,
+        # #679 (F2): a CANCELLED execution carries a real status + a
+        # "cancelled by user" error; surface both like failed/success so the
+        # public poller gets a reason instead of a silent null body.
+        "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
+        "error": execution.error if execution.status in ("failed", "cancelled") else None,
     }
 
 

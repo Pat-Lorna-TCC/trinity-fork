@@ -31,6 +31,7 @@ from db_models import (
     User,
     SessionMessageInsert,
     AgentShare,
+    AgentOperatorAccess,
     AgentShareRequest,
     McpApiKeyCreate,
     McpApiKey,
@@ -111,6 +112,7 @@ from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
+from db.reports import ReportOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
@@ -329,6 +331,7 @@ class DatabaseManager:
         self._chat_ops = ChatOperations()
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
+        self._report_ops = ReportOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
@@ -409,6 +412,9 @@ class DatabaseManager:
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)
 
+    def count_non_system_agents(self) -> int:
+        return self._agent_ops.count_non_system_agents()
+
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
 
@@ -420,6 +426,9 @@ class DatabaseManager:
 
     def is_agent_name_reserved(self, agent_name: str):
         return self._agent_ops.is_agent_name_reserved(agent_name)
+
+    def is_agent_live(self, agent_name: str):
+        return self._agent_ops.is_agent_live(agent_name)
 
     def recover_agent_ownership(self, agent_name: str):
         return self._agent_ops.recover_agent_ownership(agent_name)
@@ -467,6 +476,9 @@ class DatabaseManager:
 
     def get_agent_shares(self, agent_name: str):
         return self._agent_ops.get_agent_shares(agent_name)
+
+    def get_agent_operator_access(self, agent_name: str):
+        return self._agent_ops.get_agent_operator_access(agent_name)
 
     def get_shared_agents(self, username: str):
         return self._agent_ops.get_shared_agents(username)
@@ -643,6 +655,25 @@ class DatabaseManager:
         return self._agent_ops.get_all_circuit_breaker_enabled()
 
     # =========================================================================
+    # MCP exposure toggle (#846)
+    # =========================================================================
+
+    def get_mcp_exposed(self, agent_name: str) -> bool:
+        return self._agent_ops.get_mcp_exposed(agent_name)
+
+    def set_mcp_exposed(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_mcp_exposed(agent_name, enabled)
+
+    def get_mcp_exposed_agents(self):
+        return self._agent_ops.get_mcp_exposed_agents()
+
+    def get_tts_config(self, agent_name: str):
+        return self._agent_ops.get_tts_config(agent_name)
+
+    def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
+        return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
+
+    # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
 
@@ -741,6 +772,23 @@ class DatabaseManager:
     def set_voice_system_prompt(self, agent_name: str, prompt: str):
         return self._agent_ops.set_voice_system_prompt(agent_name, prompt)
 
+    def get_voice_name(self, agent_name: str):
+        return self._agent_ops.get_voice_name(agent_name)
+
+    def set_voice_name(self, agent_name: str, voice_name):
+        return self._agent_ops.set_voice_name(agent_name, voice_name)
+    def get_public_channel_system_prompt(self, agent_name: str):
+        return self._agent_ops.get_public_channel_system_prompt(agent_name)
+
+    def set_public_channel_system_prompt(self, agent_name: str, prompt):
+        return self._agent_ops.set_public_channel_system_prompt(agent_name, prompt)
+
+    def get_public_channel_model(self, agent_name: str):
+        return self._agent_ops.get_public_channel_model(agent_name)
+
+    def set_public_channel_model(self, agent_name: str, model):
+        return self._agent_ops.set_public_channel_model(agent_name, model)
+
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
     # =========================================================================
@@ -833,6 +881,14 @@ class DatabaseManager:
 
     def get_webhook_status(self, schedule_id: str):
         return self._schedule_ops.get_webhook_status(schedule_id)
+
+    def set_webhook_secret(self, schedule_id: str):
+        # ent#77: mint/rotate the HMAC signing secret; returns plaintext once.
+        return self._schedule_ops.set_webhook_secret(schedule_id)
+
+    def clear_webhook_secret(self, schedule_id: str):
+        # ent#77: disable signature auth + drop the stored secret.
+        return self._schedule_ops.clear_webhook_secret(schedule_id)
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
@@ -969,6 +1025,10 @@ class DatabaseManager:
 
     def get_git_config(self, agent_name: str):
         return self._schedule_ops.get_git_config(agent_name)
+
+    def get_git_config_agent_names_for_repo(self, github_repo: str):
+        """trinity-enterprise#93: fork-to-own destination-binding guard."""
+        return self._schedule_ops.get_git_config_agent_names_for_repo(github_repo)
 
     def update_git_sync(self, agent_name: str, commit_sha: str):
         return self._schedule_ops.update_git_sync(agent_name, commit_sha)
@@ -1125,6 +1185,39 @@ class DatabaseManager:
 
     def get_current_activities(self, agent_name: str):
         return self._activity_ops.get_current_activities(agent_name)
+
+    # =========================================================================
+    # Agent Report Methods (#918 — delegated to db/reports.py)
+    # =========================================================================
+
+    def create_report(self, agent_name, user_id, report_type, title, payload,
+                       display_hint=None, schema_version=1,
+                       period_start=None, period_end=None):
+        return self._report_ops.create_report(
+            agent_name, user_id, report_type, title, payload,
+            display_hint, schema_version, period_start, period_end,
+        )
+
+    def get_report(self, report_id: str):
+        return self._report_ops.get_report(report_id)
+
+    def get_reports_for_agent(self, agent_name: str, report_type: str = None,
+                              limit: int = 50, offset: int = 0):
+        return self._report_ops.get_reports_for_agent(agent_name, report_type, limit, offset)
+
+    def get_fleet_reports(self, agent_names, report_type: str = None, hours: int = None,
+                          search: str = None, limit: int = 50, offset: int = 0):
+        return self._report_ops.get_fleet_reports(
+            agent_names, report_type, hours, search, limit, offset)
+
+    def get_fleet_report_stats(self, agent_names, report_type: str = None, hours: int = None):
+        return self._report_ops.get_fleet_report_stats(agent_names, report_type, hours)
+
+    def delete_report(self, agent_name: str, report_id: str):
+        return self._report_ops.delete_report(agent_name, report_id)
+
+    def prune_agent_reports(self, retention_days: int = 90, chunk_size: int = 1000):
+        return self._report_ops.prune_agent_reports(retention_days, chunk_size)
 
     # =========================================================================
     # Cleanup Operations (for CleanupService)
@@ -1388,14 +1481,25 @@ class DatabaseManager:
     def get_public_chat_session(self, session_id: str):
         return self._public_chat_ops.get_session(session_id)
 
-    def add_public_chat_message(self, session_id: str, role: str, content: str, cost: float = None):
-        return self._public_chat_ops.add_message(session_id, role, content, cost)
+    def add_public_chat_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        cost: float = None,
+        sender_email: str = None,
+        sender_label: str = None,
+    ):
+        return self._public_chat_ops.add_message(
+            session_id, role, content, cost,
+            sender_email=sender_email, sender_label=sender_label,
+        )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20):
-        return self._public_chat_ops.get_session_messages(session_id, limit)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
+        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
 
-    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20):
-        return self._public_chat_ops.get_recent_messages(session_id, limit)
+    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
+        return self._public_chat_ops.get_recent_messages(session_id, limit, sender_email=sender_email)
 
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)
@@ -1541,6 +1645,9 @@ class DatabaseManager:
 
     def list_subscriptions(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions(owner_id)
+
+    def has_any_subscription(self):
+        return self._subscription_ops.has_any_subscription()
 
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
@@ -1790,6 +1897,9 @@ class DatabaseManager:
     def get_slack_channel_for_agent(self, team_id, agent_name):
         return self._slack_channel_ops.get_channel_for_agent(team_id, agent_name)
 
+    def get_slack_channels_for_agent(self, agent_name):
+        return self._slack_channel_ops.get_channels_for_agent(agent_name)
+
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
 
@@ -1835,6 +1945,9 @@ class DatabaseManager:
 
     def increment_telegram_message_count(self, chat_link_id):
         return self._telegram_channel_ops.increment_message_count(chat_link_id)
+
+    def list_telegram_clients_for_agent(self, agent_name):
+        return self._telegram_channel_ops.list_clients_for_agent(agent_name)
 
     def get_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.get_verified_email(binding_id, telegram_user_id)
@@ -1929,6 +2042,9 @@ class DatabaseManager:
     def increment_whatsapp_message_count(self, chat_link_id):
         return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
 
+    def list_whatsapp_clients_for_agent(self, agent_name):
+        return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
+
     # =========================================================================
     # VoIP Telephony (delegated to db/voip.py) - VOIP-001 (#1056)
     # =========================================================================
@@ -1959,6 +2075,9 @@ class DatabaseManager:
 
     def delete_voip_binding(self, agent_name):
         return self._voip_ops.delete_binding(agent_name)
+
+    def set_voip_enabled(self, agent_name, enabled):
+        return self._voip_ops.set_enabled(agent_name, enabled)
 
     def create_voip_call_log(self, call_id, agent_name, to_number, chat_session_id=None,
                             initiated_by_user_id=None, initiated_by_email=None,

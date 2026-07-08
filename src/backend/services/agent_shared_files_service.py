@@ -13,6 +13,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import os
@@ -29,6 +30,7 @@ import docker.errors
 from fastapi import HTTPException
 
 from database import db
+from services import idempotency_service
 from services.docker_service import get_agent_container
 from services.docker_utils import container_get_archive
 from services.settings_service import get_public_chat_url
@@ -394,9 +396,18 @@ async def create_share(
     display_name: Optional[str] = None,
     expires_in: Optional[int] = None,
     created_by: Optional[str] = None,
+    execution_id: Optional[str] = None,
+    dedup_label: str = "",
 ) -> dict:
     """
     End-to-end: extract → validate → persist → DB insert → return URL payload.
+
+    Effect-scoped idempotency (#1084): the token-mint + persist is wrapped in
+    the effect guard keyed on the filename + a sha256 of the extracted CONTENT,
+    scoped to ``execution_id``. A re-run of the same turn sharing the same file
+    replays the original signed URL instead of minting a second token; a changed
+    file (different content) under the same name produces a new share. Fail-open
+    when ``execution_id`` is absent/invalid (old image / the internal path).
     """
     # --- flag gate ---
     if not db.get_file_sharing_enabled(agent_name):
@@ -408,17 +419,38 @@ async def create_share(
     # --- path ---
     container_path = validate_publish_path(filename)
 
-    # --- extract ---
+    # --- extract (needed up-front so the effect key can version on content) ---
     data, basename = await extract_from_agent(agent_name, container_path)
+    content_version = hashlib.sha256(data).hexdigest()
 
-    return _persist_and_register(
-        agent_name,
-        data,
-        basename=basename,
-        display_name=display_name,
-        expires_in=expires_in,
-        created_by=created_by,
-    )
+    async with idempotency_service.effect_guard(
+        "share_file",
+        {"filename": filename, "content": content_version},
+        execution_id=execution_id,
+        agent_name=agent_name,
+        dedup_label=dedup_label,
+    ) as guard:
+        if guard.replay:
+            # A completed replay is terminal — never re-mint the share. If the
+            # stored snapshot is missing (NULL/unparseable in the row — unreachable
+            # in normal flow, but the DB contract permits it) we cannot rebuild the
+            # signed URL, so surface an error rather than minting a second token (#1084 I2).
+            if guard.snapshot is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Share already created for this execution but its URL is unavailable.",
+                )
+            return guard.snapshot
+        result = _persist_and_register(
+            agent_name,
+            data,
+            basename=basename,
+            display_name=display_name,
+            expires_in=expires_in,
+            created_by=created_by,
+        )
+        guard.snapshot = result
+        return result
 
 
 def create_share_from_bytes(
@@ -428,6 +460,7 @@ def create_share_from_bytes(
     display_name: str,
     expires_in: Optional[int] = None,
     created_by: Optional[str] = None,
+    require_sharing_enabled: bool = True,
 ) -> dict:
     """
     Persist already-in-memory bytes as a public share and mint a download URL —
@@ -439,11 +472,17 @@ def create_share_from_bytes(
     that deliver media by URL (Twilio fetches the public ``?sig=`` URL
     server-side) instead of uploading bytes directly.
 
+    ``require_sharing_enabled=False`` skips the per-agent file-sharing toggle for
+    internally-generated media that has its OWN feature gate — e.g. WhatsApp voice
+    replies (trinity-enterprise#56), which must host a transient audio note for
+    Twilio to fetch and are already gated by ``tts_voice_replies_enabled``. The
+    MIME-blocklist / quota / disk protections still apply.
+
     Raises ``HTTPException`` (403 gate / 400 expiry / 413 quota / 507 disk /
     400 MIME-blocked) exactly like ``create_share`` — callers must isolate it so
     one rejected file never aborts a whole response.
     """
-    if not db.get_file_sharing_enabled(agent_name):
+    if require_sharing_enabled and not db.get_file_sharing_enabled(agent_name):
         raise HTTPException(status_code=403, detail="FEATURE_DISABLED: file sharing is not enabled for this agent")
 
     expires_in = _validate_expires_in(expires_in)

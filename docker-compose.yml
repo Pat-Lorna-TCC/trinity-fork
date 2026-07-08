@@ -35,6 +35,13 @@ services:
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
+      # Both default OFF; must reach the container or the flags stay false (config.py).
+      - BRAIN_ORB_ENABLED=${BRAIN_ORB_ENABLED:-false}
+      - BRAIN_ORB_VOICE_ENABLED=${BRAIN_ORB_VOICE_ENABLED:-false}
+      # KB-write surface (#61 Phase 4a) — owner-gated capture/link. Distinct kill-switch
+      # so writes disable without downing read/voice. Default OFF (config.py).
+      - BRAIN_ORB_WRITE_ENABLED=${BRAIN_ORB_WRITE_ENABLED:-false}
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Master switch must
       # reach the container or voip_available stays false (read by config.py).
       - VOIP_ENABLED=${VOIP_ENABLED:-false}
@@ -44,12 +51,31 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
+      # gates the feature (empty ⇒ adapters deliver text). Must reach the
+      # container or the .env lever is inert (the #1056/#1039 packaging class).
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}  # non-empty default (#1076)
+      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-1500}                      # shared synth cost cap (chars)
+      # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
+      # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
+      - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Public webhook trigger hardening (#1023, #1424) — 60s windows fixed in code.
+      # Must reach the container or the .env lever is inert (the #1056/#1039 packaging class).
+      - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
+      - WEBHOOK_IP_RATE_LIMIT=${WEBHOOK_IP_RATE_LIMIT:-60}       # pre-auth requests per IP per 60s
+      - WEBHOOK_MAX_BODY_BYTES=${WEBHOOK_MAX_BODY_BYTES:-16384}  # request-body cap (413 over)
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
+      # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
+      # it must reach the backend here or the .env lever is inert (#1039 class).
+      # Default (1800s) lives agent-side; 0/negative disables. Recreate to apply.
+      - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
       # OpenTelemetry Configuration (Optional)
       - OTEL_ENABLED=${OTEL_ENABLED:-0}
       - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}
@@ -82,6 +108,7 @@ services:
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Credential Encryption
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
+      - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
       # Agent auth master (#1159) - backend derives each agent's in-container
@@ -152,6 +179,18 @@ services:
       # (observability). The actual routing gate is the mcp-server's read of the
       # SAME env key; keep both in sync via this single .env var.
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # Correlated-failure / thundering-herd controls (#1085) — re-delivery
+      # governor. Backend-only; all fail-open and inert until the master flag is
+      # on. Wired here so the .env levers actually reach the container.
+      - REDELIVERY_GOVERNOR_ENABLED=${REDELIVERY_GOVERNOR_ENABLED:-false}
+      - REDELIVERY_FLEET_LIMIT=${REDELIVERY_FLEET_LIMIT:-600}
+      - REDELIVERY_FLEET_WINDOW_SECONDS=${REDELIVERY_FLEET_WINDOW_SECONDS:-60}
+      - REDELIVERY_AGENT_LIMIT=${REDELIVERY_AGENT_LIMIT:-20}
+      - REDELIVERY_AGENT_WINDOW_SECONDS=${REDELIVERY_AGENT_WINDOW_SECONDS:-60}
+      - CORRELATED_FAILURE_THRESHOLD=${CORRELATED_FAILURE_THRESHOLD:-20}
+      - CORRELATED_FAILURE_WINDOW_SECONDS=${CORRELATED_FAILURE_WINDOW_SECONDS:-120}
+      - CORRELATED_PAUSE_TTL_SECONDS=${CORRELATED_PAUSE_TTL_SECONDS:-300}
+      - REDELIVERY_PAUSE_RETRY_AFTER_SECONDS=${REDELIVERY_PAUSE_RETRY_AFTER_SECONDS:-30}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app
@@ -162,13 +201,15 @@ services:
       - ./config/process-docs:/app/config/process-docs:ro  # Process documentation
       - agent-configs:/agent-configs
       - trinity-data:/data
-      - trinity-logs:/data/logs:ro  # Read-only access to Vector logs
+      - trinity-logs:/data/logs  # rw: log_archive_service must delete archived originals (#1478); Vector is the sole writer of new lines
       - trinity-archives:/data/archives  # Log archives storage
     depends_on:
       redis:
         condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       vector:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
+      logs-init:
+        condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
     networks:
       - trinity-platform   # Redis, scheduler, vector, OTel
       - trinity-agent      # Frontend, mcp-server, agent containers
@@ -178,10 +219,14 @@ services:
       - ALL
     # No cap_add: backend listens on 8000 (>=1024, no NET_BIND_SERVICE needed)
     # and reaches /var/run/docker.sock via group_add below — not capabilities.
-    # Issue #874: backend runs as UID 1000 (non-root) but still needs to talk
-    # to /var/run/docker.sock. On Linux the socket is group-owned by `docker`
-    # (typically GID 999 on Debian/Ubuntu, ~990 on RHEL family). macOS Docker
-    # Desktop ignores group_add; the default is safe there.
+    # Issue #874 / #1131: backend runs as UID 1000 (non-root) but still needs to
+    # talk to /var/run/docker.sock. The GID to join is the socket's group as a
+    # container sees it: a Linux bind mount exposes the host `docker` group
+    # (Debian/Ubuntu 999, RHEL ~991, Arch 990); Docker Desktop / Colima / Rancher
+    # present it root-group-owned (GID 0). Docker Desktop does NOT ignore
+    # group_add — the wrong assumption it does was the #1131 regression.
+    # start.sh auto-detects the right GID into DOCKER_GID; :-999 is the
+    # Debian/Ubuntu fallback used only when .env carries no value.
     group_add:
       - "${DOCKER_GID:-999}"
     read_only: false
@@ -393,6 +438,21 @@ services:
       start_period: 10s
     mem_limit: 512m
     cpus: 1
+
+  # #1478: one-shot that makes the shared logs volume dir owned by UID 1000 so the
+  # backend (non-root) can unlink retention-archived originals. Vector writes new
+  # log files as root; deleting a file needs write on the *directory*, not the file,
+  # so chowning just the dir (fast, not -R) is enough. Runs as root (needs CAP_CHOWN,
+  # so no cap_drop); exits immediately; backend waits on completion.
+  logs-init:
+    image: alpine:3.20
+    container_name: trinity-logs-init
+    command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
+    volumes:
+      - trinity-logs:/data/logs
+    restart: "no"
+    networks:
+      - trinity-platform
 
   # Vector - centralized log aggregation from all containers
   vector:

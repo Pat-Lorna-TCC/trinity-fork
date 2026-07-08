@@ -971,6 +971,80 @@ def _migrate_agent_ownership_voice_prompt(cursor, conn):
     )
     conn.commit()
 
+def _migrate_agent_ownership_voice_name(cursor, conn):
+    """Add voice_name column to agent_ownership (#28).
+
+    Persists the per-agent Gemini Live voice (e.g. 'Kore', 'Puck'). NULL means
+    unset — the getter falls back to DEFAULT_VOICE_NAME ('Kore'), preserving the
+    prior hardcoded behaviour for existing agents.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "voice_name",
+        "ALTER TABLE agent_ownership ADD COLUMN voice_name TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_public_channel_model(cursor, conn):
+    """Add public_channel_model column to agent_ownership (#894).
+
+    Per-agent model override for public-facing channels (public link, Slack/
+    Telegram/WhatsApp, x402 paid chat). NULL means inherit the platform default
+    model — preserving the prior behaviour for existing agents (additive, no
+    backfill).
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "public_channel_model",
+        "ALTER TABLE agent_ownership ADD COLUMN public_channel_model TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_public_channel_prompt(cursor, conn):
+    """Add public_channel_system_prompt column to agent_ownership (#1205).
+
+    Per-agent custom instructions appended to the system prompt for
+    public-facing conversations only (public links, Slack/Telegram/WhatsApp
+    channels, x402 paid chat). Text-surface counterpart of voice_system_prompt.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "public_channel_system_prompt",
+        "ALTER TABLE agent_ownership ADD COLUMN public_channel_system_prompt TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_public_chat_messages_sender(cursor, conn):
+    """Add per-message speaker attribution to public_chat_messages (#903).
+
+    Thread-scoped Slack channel sessions drop ``sender_id`` from the session key
+    so multi-participant threads share one context. Who-said-what moves onto each
+    message row: ``sender_email`` (verified email, drives sender-filtered MEM-001
+    summarization) + ``sender_label`` (display name for attributed history
+    replay). Both nullable — pre-migration rows replay via role fallback.
+    Mirrored by Alembic 0013_public_chat_messages_sender for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "public_chat_messages",
+        "sender_email",
+        "ALTER TABLE public_chat_messages ADD COLUMN sender_email TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "public_chat_messages",
+        "sender_label",
+        "ALTER TABLE public_chat_messages ADD COLUMN sender_label TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
 
@@ -1839,6 +1913,25 @@ def _migrate_agent_schedules_webhook(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_schedules_webhook_auth(cursor, conn):
+    """Add optional HMAC signature auth to schedule webhooks (trinity-enterprise#77).
+
+    webhook_secret_encrypted holds an AES-256-GCM envelope of the signing secret
+    (Invariant #12); webhook_auth_enabled gates verification in the public
+    trigger. Both default off, so an existing token-in-URL webhook is unchanged.
+    """
+    _safe_add_column(
+        cursor, "agent_schedules", "webhook_secret_encrypted",
+        "ALTER TABLE agent_schedules ADD COLUMN webhook_secret_encrypted TEXT",
+        log_msg="Adding webhook_secret_encrypted to agent_schedules for webhook signature auth (ent#77)...",
+    )
+    _safe_add_column(
+        cursor, "agent_schedules", "webhook_auth_enabled",
+        "ALTER TABLE agent_schedules ADD COLUMN webhook_auth_enabled INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_shared_files(cursor, conn):
     """Create agent_shared_files table and add file_sharing_enabled to agent_ownership.
 
@@ -2489,6 +2582,147 @@ def _migrate_agent_compatibility_results_table(cursor, conn):
     print("Created agent_compatibility_results table (#668)")
 
 
+def _migrate_agent_loops_max_duration(cursor, conn):
+    """#1156 — loop-level wall-clock deadline.
+
+    Adds `max_duration_seconds INTEGER` (NULL = no deadline) to `agent_loops`.
+    The runner stops the loop at the next iteration boundary once the deadline
+    measured from `started_at` is exceeded (stop_reason='deadline_exceeded'),
+    bounding total loop duration alongside the existing `max_runs` cap.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "max_duration_seconds",
+        "ALTER TABLE agent_loops ADD COLUMN max_duration_seconds INTEGER",
+    )
+    conn.commit()
+
+
+def _migrate_agent_loops_max_cost(cursor, conn):
+    """#1155 — per-loop USD cost budget.
+
+    Adds `max_cost_usd REAL` (NULL = no limit) to `agent_loops`. The runner
+    accumulates per-run cost and stops the loop at the next iteration boundary
+    once accumulated cost meets/exceeds the budget
+    (stop_reason='budget_exhausted'), bounding total loop spend alongside the
+    existing `max_runs` cap. Mirrored by the Alembic revision
+    0008_agent_loops_max_cost for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "max_cost_usd",
+        "ALTER TABLE agent_loops ADD COLUMN max_cost_usd REAL",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_mcp_exposed(cursor, conn):
+    """#846 — per-agent MCP exposure toggle.
+
+    Adds ``mcp_exposed INTEGER DEFAULT 0`` to ``agent_ownership``. When set, the
+    Trinity MCP server (which polls the backend) dynamically registers a
+    dedicated ``chat_with_<slug>`` tool for the agent. Default 0 (OFF) — opt-in,
+    owner-toggled. Mirrored by the Alembic revision
+    0009_agent_ownership_mcp_exposed for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "mcp_exposed",
+        "ALTER TABLE agent_ownership ADD COLUMN mcp_exposed INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_tts_voice(cursor, conn):
+    """epic #24 / #25 — outbound voice replies (shared agent-level config).
+
+    Adds ``tts_voice_replies_enabled INTEGER DEFAULT 0`` and ``tts_voice_id TEXT``
+    to ``agent_ownership``. When enabled with a voice id, channel adapters speak
+    the agent's reply via the shared ``services/tts_service.py`` (ElevenLabs →
+    OGG/Opus). Shared per-agent primitive (no per-channel column sprawl) consumed
+    by Telegram (#25) first, then Slack (#26) and WhatsApp (trinity-enterprise#56).
+    Default OFF. Mirrored by Alembic 0011_agent_ownership_tts_voice for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "tts_voice_replies_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN tts_voice_replies_enabled INTEGER DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "tts_voice_id",
+        "ALTER TABLE agent_ownership ADD COLUMN tts_voice_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_loops_no_progress(cursor, conn):
+    """#1157 — no-progress / doom-loop detection.
+
+    Adds `no_progress_threshold INTEGER` to `agent_loops`. NULL = disabled
+    (back-compat for in-flight loops created before this change); new loops
+    created via the API/MCP default to 3. The runner fingerprints each
+    successful run's response and stops the loop (stop_reason='no_progress')
+    once K consecutive runs produce an identical fingerprint.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "no_progress_threshold",
+        "ALTER TABLE agent_loops ADD COLUMN no_progress_threshold INTEGER",
+    )
+    conn.commit()
+
+
+def _migrate_agent_reports_table(cursor, conn):
+    """Create agent_reports table (#918).
+
+    Agent-published structured reports (telemetry / domain reports) surfaced on
+    the dashboard. Schema is also defined in db/schema.py for fresh installs;
+    this migration handles existing installs. Idempotent. Mirrored by the
+    Alembic revision 0006_agent_reports for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_reports)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_reports (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER,
+            report_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            display_hint TEXT,
+            schema_version INTEGER DEFAULT 1,
+            period_start TEXT,
+            period_end TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent "
+        "ON agent_reports(agent_name, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_type "
+        "ON agent_reports(report_type, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_created "
+        "ON agent_reports(created_at)"
+    )
+    conn.commit()
+    print("Created agent_reports table (#918)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2541,6 +2775,7 @@ MIGRATIONS = [
     ("sync_health", _migrate_sync_health),
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
+    ("agent_schedules_webhook_auth", _migrate_agent_schedules_webhook_auth),
     ("agent_shared_files", _migrate_agent_shared_files),
     ("agent_sessions_tables", _migrate_agent_sessions_tables),
     ("session_compact_events", _migrate_session_compact_events),
@@ -2564,4 +2799,14 @@ MIGRATIONS = [
     ("operator_queue_cleared_at", _migrate_operator_queue_cleared_at),
     ("activities_created_index", _migrate_activities_created_index),
     ("agent_compatibility_results_table", _migrate_agent_compatibility_results_table),
+    ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
+    ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
+    ("agent_reports_table", _migrate_agent_reports_table),
+    ("agent_loops_no_progress", _migrate_agent_loops_no_progress),
+    ("agent_loops_max_cost", _migrate_agent_loops_max_cost),
+    ("agent_ownership_public_channel_model", _migrate_agent_ownership_public_channel_model),
+    ("agent_ownership_mcp_exposed", _migrate_agent_ownership_mcp_exposed),
+    ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
+    ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
+    ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
 ]

@@ -255,7 +255,18 @@ async def summarize_user_memory_background(
         memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
         existing_summary = memory_record.get("conversation_summary", "") or ""
 
-        messages = db.get_recent_public_chat_messages(session_id, limit=20)
+        # #903 (F-MEM): a thread-scoped channel session can hold turns from
+        # several users. Filter to the current user's own turns so Alice's
+        # conversation never persists into Bob's durable, re-injected memory.
+        # Single-participant paths (web + any channel DM: Slack/Telegram/
+        # WhatsApp) stamp BOTH the user turn and the assistant reply with the
+        # recipient's email, so the filter is a no-op there (full user+assistant
+        # conversation, as before #903). Only a multi-participant session (Slack
+        # channel thread or group chat) leaves the assistant turn null, so the
+        # shared reply is excluded from any one participant's memory.
+        messages = db.get_recent_public_chat_messages(
+            session_id, limit=20, sender_email=user_email
+        )
         if not messages:
             return
 
@@ -600,6 +611,36 @@ def compose_system_prompt(
         parts.append(caller_prompt.strip())
 
     return "\n\n".join(parts)
+
+
+def build_public_channel_caller_prompt(
+    agent_name: str, memory_system_prompt: Optional[str] = None
+) -> Optional[str]:
+    """Caller-prompt fragment for public/channel surfaces (#1205).
+
+    Folds the per-agent public/channel custom instructions
+    (``public_channel_system_prompt``) together with the MEM-001 per-user memory
+    block into the single string public/channel callers pass as
+    ``execute_task(system_prompt=...)`` → ``compose_system_prompt(caller_prompt=...)``.
+    Public instructions come first (persona / guardrails / scope), then the
+    per-user memory block.
+
+    Strict no-op when the agent has no public prompt set: returns the memory
+    block unchanged (or ``None``). Never raises — a lookup failure degrades to
+    just the memory block so a chat is never blocked on this. Only the
+    public-facing surfaces (channel router, public chat, paid chat) call this;
+    authenticated chat, schedules, loops, and agent-to-agent calls do not, which
+    is what keeps the fragment scoped to outside audiences.
+    """
+    try:
+        public_prompt = db.get_public_channel_system_prompt(agent_name)
+    except Exception as e:  # noqa: BLE001 - never block a chat on this lookup
+        logger.warning(
+            "public_channel_system_prompt fetch failed for %s: %s", agent_name, e
+        )
+        public_prompt = None
+    parts = [p for p in (public_prompt, memory_system_prompt) if p and p.strip()]
+    return "\n\n".join(parts) if parts else None
 
 
 def is_execution_context_enabled() -> bool:

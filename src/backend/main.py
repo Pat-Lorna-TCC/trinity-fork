@@ -15,6 +15,7 @@ Refactored for better concern separation:
 import asyncio
 import json
 import os
+import random
 from datetime import datetime
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
@@ -46,6 +47,7 @@ from routers.agents import router as agents_router, set_websocket_manager as set
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
+from routers.agent_brain_orb import router as agent_brain_orb_router  # #58 Brain Orb proxy
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
 from routers.credentials import router as credentials_router
@@ -81,6 +83,8 @@ from routers.internal import router as internal_router
 from routers.tags import router as tags_router
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
+from routers.reports import router as reports_router
+from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
@@ -113,6 +117,7 @@ from services.activity_service import activity_service
 
 # Import system agent service
 from services.system_agent_service import system_agent_service
+from services.cornelius_agent_service import cornelius_agent_service
 
 # Import log archive service
 from services.log_archive_service import log_archive_service
@@ -240,6 +245,8 @@ set_chat_ws_manager(manager)
 set_public_links_ws_manager(manager)
 set_notifications_ws_manager(manager)
 set_notifications_filtered_ws_manager(filtered_manager)
+set_reports_ws_manager(manager)
+set_reports_filtered_ws_manager(filtered_manager)
 set_monitoring_ws_manager(manager)
 set_monitoring_filtered_ws_manager(filtered_manager)
 set_operator_queue_ws_manager(manager)
@@ -389,6 +396,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error deploying system agent: {e}")
             # Don't fail startup - system agent is important but not critical for platform operation
+
+        # Seed the default Cornelius agent on a fresh install (ent#107). This is the
+        # UPGRADE / safety-net path: a fresh install's FIRST seed happens from the
+        # setup-completion hook (routers/setup.py, right after the admin is created),
+        # but an already-set-up empty install upgraded to this version has no such
+        # hook to fire — so seed here on the first post-upgrade boot. Gated on
+        # setup_completed (the admin owner must exist) and fire-and-forget via
+        # create_task so a container create never blocks readiness. The service is
+        # idempotent, first-run-only, fresh-install-scoped, and Redis-locked across
+        # workers, so scheduling it in every worker is safe.
+        try:
+            if _db.get_setting_value('setup_completed', 'false') == 'true':
+                asyncio.create_task(cornelius_agent_service.ensure_seeded())
+        except Exception as e:
+            logger.error(f"Error scheduling Cornelius seed: {e}")
     else:
         logger.info("Docker not available - running in demo mode")
 
@@ -481,14 +503,18 @@ async def lifespan(app: FastAPI):
         capacity = get_capacity_manager()
 
         async def _capacity_maintenance_loop():
-            # First tick after a short delay so startup stays snappy.
-            await asyncio.sleep(15)
+            # First tick after a short delay so startup stays snappy. #1085: a
+            # small startup jitter so replicas don't realign their maintenance
+            # ticks after a coordinated restart.
+            await asyncio.sleep(15 + random.uniform(0, 2))
             while True:
                 try:
                     await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
                     logger.warning(f"[Capacity] maintenance tick failed: {exc}")
-                await asyncio.sleep(60)
+                # #1085: jitter the loop period so concurrent replicas' drain
+                # sweeps spread out instead of firing in lockstep every 60s.
+                await asyncio.sleep(60 + random.uniform(0, 15))
 
         asyncio.create_task(_capacity_maintenance_loop())
         logger.info("CapacityManager initialised; maintenance loop running (60s)")
@@ -875,6 +901,7 @@ app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)
+app.include_router(agent_brain_orb_router)  # #58: Brain Orb read-only data proxy
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)
 app.include_router(activities_router)
@@ -910,6 +937,7 @@ app.include_router(internal_router)  # Internal agent-to-backend endpoints (no a
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
+app.include_router(reports_router)  # Agent Reports (#918)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
@@ -943,19 +971,24 @@ app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 # at `src/backend/enterprise/`, repo `Abilityai/trinity-enterprise`).
 # The submodule is OPTIONAL: customers running the public repo without
 # enterprise access clone without it, and the ImportError below silently
-# no-ops. When mounted, `register_enterprise(app)` installs the SSO /
-# SCIM / SIEM routers under `/api/enterprise/*`. The function is
+# no-ops. When mounted, `register_enterprise(app)` installs the private
+# enterprise routers under `/api/enterprise/*`. The function is
 # idempotent (guards on `app.state.enterprise_registered`). Entitlement
 # gating happens per-endpoint via `requires_entitlement(feature_id)`
 # from `dependencies.py` — endpoints are mounted unconditionally and
 # the gate decides whether to serve them. This keeps the wiring
 # deterministic regardless of license state.
 #
+# The specific paid modules the submodule installs are intentionally NOT
+# enumerated here — this is a PUBLIC repo, and the paid-feature catalog
+# lives only in the private enterprise repo (trinity-enterprise#45). This
+# comment (and entitlement_service.py) are grepped by the enterprise-docs
+# guard, so keep it to the generic seam. See `docs/ENTERPRISE.md`.
+#
 # Import path is `enterprise.backend.register_enterprise`: the private
 # repo is restructured into `backend/` and `frontend/` subdirs so the
 # same repo can be dual-mounted (`src/backend/enterprise/` for Python,
-# `src/frontend/src/enterprise/` for Vite). See
-# `docs/planning/ENTERPRISE_ARCHITECTURE.md` for rationale.
+# `src/frontend/src/enterprise/` for Vite).
 try:
     from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
     register_enterprise(app)
@@ -1170,12 +1203,18 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now()}
 
 
-def _build_version_payload(voice_enabled: bool) -> dict:
+def _build_version_payload(
+    voice_enabled: bool, edition: str, enterprise_features: list
+) -> dict:
     """Pure dict-builder for the `/api/version` payload (#926-testable).
 
     Extracted from the FastAPI handler so the env-var → response mapping
     can be tested without pulling main.py's full router graph through
-    importlib (opentelemetry, slack_sdk, twilio, …).
+    importlib (opentelemetry, slack_sdk, twilio, …). Keep it stdlib-only:
+    the unit tests exec-slice this function out of the source, so any
+    dependency on module state (e.g. entitlement_service) would break
+    them — `edition`/`enterprise_features` are computed by the handler
+    and threaded in as parameters (#1443).
     """
     import os
     from pathlib import Path
@@ -1205,12 +1244,19 @@ def _build_version_payload(voice_enabled: bool) -> dict:
     return {
         "version": version,
         "platform": "trinity",
+        # Effective edition (#1443): mirrors `enterprise_features`
+        # non-emptiness — "enterprise" iff ≥1 enterprise module is
+        # registered AND entitled at runtime. TRINITY_OSS_ONLY=1 or a
+        # fully-failed registration reports "oss"; consult the boot log
+        # for mounted-but-degraded states.
+        "edition": edition,
+        "enterprise_features": enterprise_features,
         "components": {
             "backend": version,
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli"],
+        "runtimes": ["claude-code", "gemini-cli", "codex"],
         "build_date": os.getenv("BUILD_DATE", "unknown"),
         "git_commit": git_commit,
         "git_commit_short": git_commit_short,
@@ -1231,8 +1277,26 @@ async def get_version(current_user: User = Depends(get_current_user)):
     come from Dockerfile ARG/ENV wired through docker-compose
     `backend.build.args` and `scripts/deploy/start.sh`. Default to "unknown"
     when the build args are absent (local dev / volume-mount workflows).
+
+    `edition` (#1443) is the effective open-core edition: "enterprise" iff
+    `entitlement_service.list_entitled_features()` is non-empty (same source
+    as `enterprise_features` in GET /api/settings/feature-flags, so the two
+    surfaces can never diverge). It reflects runtime entitlement state, not
+    submodule presence on disk — a mounted-but-failed registration reports
+    "oss"; a partial registration reports "enterprise" with the surviving
+    modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
     """
-    return _build_version_payload(VOICE_ENABLED and bool(GEMINI_API_KEY))
+    # Function-local import (matches routers/settings.py): the module
+    # global is rebound by `_set_for_testing`, so a top-level
+    # `from … import entitlement_service` would freeze the boot-time
+    # instance and bypass test stubs.
+    from services.entitlement_service import entitlement_service
+
+    features = entitlement_service.list_entitled_features()
+    edition = "enterprise" if features else "oss"
+    return _build_version_payload(
+        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features
+    )
 
 
 # User info endpoint
