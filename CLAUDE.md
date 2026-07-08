@@ -107,6 +107,8 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 
 **Two trackers (open-core).** The public tracker (`abilityai/trinity`) carries bugs, refactors, and docs; feature/epic planning lives in a private tracker. Tracker ≠ code repo — core code always lands as a public-repo PR. (Core team: routing rules are in the imported team context and `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing.)
 
+**Enterprise-tracker features are entitlement-gated by default.** Treat every feature filed in `abilityai/trinity-enterprise` as a gated enterprise module (private logic behind `requires_entitlement(...)`, gated Vue behind `enterprise_features`) **unless the user explicitly decides it should be OSS-core.** Do NOT infer "generic OSS" just because it reuses OSS tables/endpoints — "can build in OSS" ≠ "should"; monetization is the user's call. If OSS-core is chosen, the OSS side keeps only the edition-agnostic *enforcement* primitive; the feature stays in the private submodule. Confirm the gating shape before building.
+
 ---
 
 ## Rules of Engagement

@@ -15,8 +15,12 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-07 | trinity-enterprise#107 | feat: auto-seed a default **Cornelius** second-brain agent on fresh install with the Brain Orb enabled — bundled `local:cornelius` template (pre-generated seed graph so the orb renders immediately); first-run-only (durable `cornelius_seeded` flag) + fresh-install-scoped (`count_non_system_agents()`) `ensure_seeded()`; setup-completion BackgroundTask + `main.py` lifespan safety-net; local bundle ⇒ no upstream `origin` (durable ownership deferred to fork-to-own trinity-enterprise#109) | [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md) |
+| 2026-07-06 | #1450 | fix(canary): B-01 queue-status coherence — Side B (queued id-count) reads via the SAME `get_engine()`/`DATABASE_URL` seam as the accessor (backend-consistent on Postgres, not raw-sqlite vs engine; #300/#1093 gap), dedicated `queued_ids_via_engine` field leaves `queued_exec_ids` for B-02/E-02; collector does one confirm-re-read so a transient enqueue/drain race self-heals while a persistent drift still fires; engine-read failure → B-01 skip. Production residue of #1446 | [architecture.md](architecture.md) |
+| 2026-07-06 | #1489 | fix(frontend): plumb `VITE_BUG_REPORTING_ENABLED` / `VITE_BUG_INTAKE_URL` as prod build args (`ARG`+`ENV` in `Dockerfile.prod` before `npm run build`, `${VAR:-default}` compose `build.args`, `.env.example` docs) so the #1116 disable/repoint knobs actually reach the shipped image — Vite inlines `import.meta.env` at build time. compose==ARG==code default; disable works end-to-end, repoint still CSP-blocked (deferred #1485). Umbrella #1485 | [in-app-bug-reporting.md](feature-flows/in-app-bug-reporting.md) |
 | 2026-07-04 | #903 | fix(slack): thread-scoped session + per-speaker attribution + sender-filtered memory | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-07-04 | #1445 | fix(webhooks): gate schedule/webhook **creation** on a live owning agent (`is_agent_live` → 404; access-check-first so non-owners see a uniform 403) so a webhook token always resolves to a schedule of a live agent — closes the orphan-schedule class that made valid tokens 404 after #1423's soft-delete-aware token-lookup INNER JOIN | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
+| 2026-07-06 | trinity-enterprise#47 | feat(ui): Dashboard **Grid view** — third mode (Grid/Graph/Timeline, not default): magnetic tile canvas on an unbounded pan/zoom lattice; five-zone 384×216 tiles (adaptive chips, Activity·14d + Context·7d charts, Run/Auto toggles); drag with socket preview + swap, tidy/reset, keyboard reorder; skeleton-first render, viewport-gated cached analytics hydration, visibility-aware batch polling. No new backend endpoints | [dashboard-grid-view.md](feature-flows/dashboard-grid-view.md) |
 | 2026-07-04 | #1018 | fix(nevermined): settlement-ordering — honest `success_unsettled` on settle-fail (was lying `"success"`); `Idempotency-Key` on the paid boundary keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-replay / unsettled-re-drive-converge; `/retry-settlement` stub → honest 501. Tier 2 durable retry split to a follow-up | [nevermined-payments.md](feature-flows/nevermined-payments.md), [effect-idempotency.md](feature-flows/effect-idempotency.md) |
 | 2026-07-04 | #186 | fix(security): close user & agent enumeration oracles — uniform 404 across the agent-access dependency family + router sweep + Tier-4 GETs; identical email-request body/status/timing; MCP `checkAgentAccess` uniform reason + owner-username removal (pentest 3.3.3) | [email-authentication.md](feature-flows/email-authentication.md), [agent-permissions.md](feature-flows/agent-permissions.md) |
 | 2026-07-04 | #1444 | fix(chat): fail-loud + owner-gated `/task` chat-session persistence (no silent swallow, IDOR fix, SUCCESS-guarded) + fast unit regression guard | [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md) |
@@ -55,6 +59,7 @@
 | Flow | Document | Description |
 |------|----------|-------------|
 | Agent Lifecycle | [agent-lifecycle.md](feature-flows/agent-lifecycle.md) | Create, start, stop, delete Docker containers |
+| Default Cornelius Agent | [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md) | Auto-seed a default Cornelius second-brain agent + enable the Brain Orb on fresh install; first-run-only, fresh-install-scoped `ensure_seeded()` (trinity-enterprise#107) |
 | Agent Rename | [agent-rename.md](feature-flows/agent-rename.md) | Rename agents via UI, MCP, or API (RENAME-001) |
 | Agent Terminal | [agent-terminal.md](feature-flows/agent-terminal.md) | Browser-based xterm.js terminal with Claude/Gemini/Bash modes |
 | Credential Injection | [credential-injection.md](feature-flows/credential-injection.md) | CRED-002: Direct file injection, encrypted git storage |
@@ -84,6 +89,7 @@
 |------|----------|-------------|
 | Agent Network (Dashboard) | [agent-network.md](feature-flows/agent-network.md) | Real-time visual graph at `/` |
 | Dashboard Timeline View | [dashboard-timeline-view.md](feature-flows/dashboard-timeline-view.md) | Graph/Timeline mode toggle with execution boxes |
+| Dashboard Grid View | [dashboard-grid-view.md](feature-flows/dashboard-grid-view.md) | Magnetic tile canvas — third dashboard mode (trinity-enterprise#47) |
 | Replay Timeline | [replay-timeline.md](feature-flows/replay-timeline.md) | Waterfall-style timeline visualization |
 | Activity Stream | [activity-stream.md](feature-flows/activity-stream.md) | Centralized persistent activity tracking |
 | Activity Monitoring | [activity-monitoring.md](feature-flows/activity-monitoring.md) | Real-time tool execution tracking |

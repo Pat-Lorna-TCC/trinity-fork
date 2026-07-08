@@ -173,6 +173,22 @@ const routes = [
     component: () => import('../views/enterprise/Audit.vue'),
     meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
+  {
+    path: '/enterprise/client-portal',
+    name: 'EnterpriseClientPortal',
+    component: () => import('../views/enterprise/ClientPortal.vue'),
+    meta: { requiresAuth: true, requiresEntitlement: 'client_portal', title: 'Client Portal' }
+  },
+  {
+    // Public client-facing portal — a client signs in with a verified email
+    // (no platform account) and sees the agents shared with them. Standalone
+    // (no NavBar / platform chrome), no requiresAuth. Backend 404s in
+    // OSS/unentitled builds; the page shows its sign-in / empty state.
+    path: '/portal',
+    name: 'ClientPortalPublic',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Client Portal' }
+  },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {
     path: '/m',

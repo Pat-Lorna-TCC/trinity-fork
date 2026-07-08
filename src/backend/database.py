@@ -412,6 +412,9 @@ class DatabaseManager:
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)
 
+    def count_non_system_agents(self) -> int:
+        return self._agent_ops.count_non_system_agents()
+
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
 
@@ -879,6 +882,14 @@ class DatabaseManager:
     def get_webhook_status(self, schedule_id: str):
         return self._schedule_ops.get_webhook_status(schedule_id)
 
+    def set_webhook_secret(self, schedule_id: str):
+        # ent#77: mint/rotate the HMAC signing secret; returns plaintext once.
+        return self._schedule_ops.set_webhook_secret(schedule_id)
+
+    def clear_webhook_secret(self, schedule_id: str):
+        # ent#77: disable signature auth + drop the stored secret.
+        return self._schedule_ops.clear_webhook_secret(schedule_id)
+
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
 
@@ -1014,6 +1025,10 @@ class DatabaseManager:
 
     def get_git_config(self, agent_name: str):
         return self._schedule_ops.get_git_config(agent_name)
+
+    def get_git_config_agent_names_for_repo(self, github_repo: str):
+        """trinity-enterprise#93: fork-to-own destination-binding guard."""
+        return self._schedule_ops.get_git_config_agent_names_for_repo(github_repo)
 
     def update_git_sync(self, agent_name: str, commit_sha: str):
         return self._schedule_ops.update_git_sync(agent_name, commit_sha)

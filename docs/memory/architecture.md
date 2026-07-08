@@ -184,7 +184,8 @@
 
 *Git & GitHub:*
 - `git_service.py` - Git sync operations for GitHub-native agents; persistent-state allowlist primitive (S4, #383)
-- `github_service.py` - GitHub API client (repo creation, validation, org detection)
+- `github_service.py` - GitHub API client (repo creation, validation, org detection, branch listing)
+- `agent_service/fork_to_own.py` - Fork-to-own template copy (trinity-enterprise#93): a template declaring `fork_to_own: required` is copied at creation into a **user-owned** repo (private by default; the user's PAT creates + pushes, then persists as the per-agent PAT #347 so recreates never fall back to the platform PAT). Origin = the user's repo; `GIT_UPSTREAM_REPO` env + a credential-less `upstream` remote (startup.sh) keep template updates one `git pull upstream` away. Destination collisions: empty or template-tip SHA-match → reuse; already bound to a live agent or holding other data → 409
 
 *Integrations:*
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
@@ -202,6 +203,7 @@
 *Skills & System:*
 - `skill_service.py` - Skill CRUD and injection
 - `system_agent_service.py` - System agent lifecycle
+- `cornelius_agent_service.py` - First-run auto-seed of the default "Cornelius" second-brain agent (bundled `local:cornelius`, Brain Orb enabled) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (trinity-enterprise#107)
 - `system_service.py` - System manifest operations
 - `log_archive_service.py` / `archive_storage.py` - Log archival + storage backend
 - `session_cleanup_service.py` - Session JSONL reaper — see [Session Tab](#session-tab)
@@ -241,6 +243,8 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 **Tab overflow — `components/OverflowTabs.vue` (#1114):** reusable "priority+" tab strip for Agent Detail: a hidden mirror row measures each tab's width plus a worst-case "More" button; the visible row renders what fits and collapses the rest into a "More ▾" menu. Re-measures on resize + `document.fonts.ready`; all-inline before first measure (no first-paint snap). The trigger reflects an overflowed active tab. Keyboard/touch accessible, dark-mode aware; `v-model` over `activeTab` so `?tab=` deep-linking is unaffected.
 
 **Agent Detail Overview tab (#1107):** `components/OverviewPanel.vue` is the default landing tab — owns "trend over the last few days" while the persistent `AgentHeader` owns "now + cost" (no duplicate live gauges). Sections: About lead, needs-attention count + Operations link (hidden at zero), trend charts, health panel (uptime/latency clamped ≤7d by `agent_health_checks` retention), recent-activity drill-in, footprint chips. Charts: `StackedBarChart.vue` (CSS/flexbox) for executions-by-type; `TrendLineChart.vue` (uPlot) for line series. `InfoPanel.vue` leads with About + "What You Can Ask", `template.yaml` metadata behind a `<details>`.
+
+**Dashboard Grid view (trinity-enterprise#47):** third dashboard mode (Grid / Graph / Timeline; Timeline stays default, choice in `localStorage['trinity-dashboard-view']`). Magnetic tile canvas: `components/FleetGrid.vue` (pan/zoom viewport + drag/swap/tidy/keyboard on an unbounded lattice — no Vue Flow) renders `components/AgentTile.vue` five-zone tiles (composing AgentAvatar/RuntimeBadge/Running+Autonomy toggles); `stores/fleetGrid.js` owns the per-user self-healing layout (localStorage v1) and lazy per-tile analytics hydration (viewport-gated, concurrency-capped, stale-while-revalidate over the `executions` store `${name}:${window}` cache); lattice math in `utils/gridLayout.js`. Chip data from batch endpoints (sync-health #389, operator-queue pending) on a visibility-aware poll active only while mounted. `network.js` additions: 3-state `viewMode`, `circuitBreakers` map, WS-driven `workingState`. **No new backend endpoints.** See [dashboard-grid-view.md](feature-flows/dashboard-grid-view.md).
 
 **Collaboration Dashboard** (`views/AgentCollaboration.vue`, `components/AgentNode.vue`, `stores/collaborations.js`): Vue Flow node graph of agent-to-agent communication — draggable status-colored nodes, edges animated 3s on collaboration, real-time activity feed, replay with time-range filtering, localStorage node positions. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed/cancelled — a user-cancelled terminal is recorded as `cancelled`, distinct from `failed`, #1332).
 
@@ -549,7 +553,8 @@ Lookup keys: S-01/E-02/L-03 shipped via #653; S-02/E-01/E-05/B-01 (Phase 2) and 
 | E-01 | B | critical | Terminal-state closure: no `running` row older than `execution_timeout_seconds + 300s` (matches `SLOT_TTL_BUFFER`, so it fires after cleanup's window) |
 | E-02 | A | critical | No phantom reversal: a row terminal in the previous cycle never reappears non-terminal (Redis state key `canary:e02:terminal_seen`) |
 | E-05 | B | major | Dispatched rows have session: no `running` row >60s with `claude_session_id IS NULL` (#106) |
-| B-01 | A | critical | Queue-status coherence: `db.get_queued_count` ≡ independently-collected `len(queued_exec_ids)` — regression guard against a future cache layer or status-filter drift |
+| E-06 | B | major | No overdue `next_run_at`: no enabled, non-deleted schedule whose `next_run_at` is older than `now − misfire_grace_time` — the "Next: Nd ago" stale-projection bug (#1472). Detection net for any residual after the fire-time-advance / add-retry root fixes; tz-aware UTC comparison |
+| B-01 | A | critical | Queue-status coherence: `db.get_queued_count` ≡ an independently-collected queued id-count — regression guard against a future cache layer or status-filter drift. Both sides now read through the SAME `get_engine()`/`DATABASE_URL` seam (#1450): Side B (`queued_ids_via_engine`, a `SELECT id`/literal `'queued'`) moved off the raw-sqlite `queued_exec_ids` set so it stays backend-consistent with the accessor on Postgres (not raw-sqlite vs engine, the #300/#1093 gap). The collector does one confirm-re-read so a concurrent enqueue/drain landing between the two reads self-heals instead of false-firing; a persistent drift survives it and fires. Independent code path preserved (COUNT/enum vs SELECT/literal) so it's not a tautology. On an engine-read failure B-01 skips (never compares an engine count to a raw-sqlite id-set). Running-side reads stay raw-sqlite (half-migrated collector; collector-wide migration is a follow-up) |
 | B-02 | B | critical | No queued without slots-full: queued > 0 ⇒ slots full OR a drain tick fired <60s ago (`canary:drain_tick_at` heartbeat) |
 | L-03 | A | crit/major | Delete cascades: no live row in any cross-cutting table (sharing, schedules, non-terminal executions, skills, tags, shared files, public links, pending operator queue/access requests, agent-scoped MCP keys, active chat sessions) referencing an `agent_name` absent from `agent_ownership`; no orphan `agent:slots:{name}` (critical for orphaned executions/slots, major otherwise; #129 class) |
 | R-01 | A | critical | No zombie Claude processes: per running agent container, `ps -eo stat,comm` shows zero `^Z.*claude` (anchored `^Z` — procps-ng emits STAT left-aligned; guards PR #407). Docker-exec source; per-container failures land in `sources_unavailable` so one unhealthy container doesn't kill the cycle |
@@ -620,15 +625,32 @@ never bypassed.
 
 Capability-gated per-agent 3D knowledge-graph page for Cornelius-class agents.
 **Shipped: static render (Phase 1) + live scope control (Phase 2) + client-held
-Gemini Live voice tile + read-only KB search (Phase 3, #60).** The orb renders the
-agent-produced graph, supports button-driven **scope mount/unmount → agent
-re-export → live rebuild**, and a **client-held voice tile** (browser connects
-directly to Gemini Live via a short-lived, config-locked ephemeral token minted by
-Trinity — no audio proxying). Still deferred to later epic children: KB-write
-actions, transcript capture, and headless-skill injection. Mirrors the workspace
-page (gated per-agent route) and the agent-owned read-surface pattern (pipelines
-#919, reports #918): the agent owns generation + scope state (Invariant #8),
-Trinity reads/renders + brokers control. Default OFF — no impact on other agents.
+Gemini Live voice tile + read-only KB search (Phase 3, #60) + owner-gated KB
+writes: capture/link + voice-transcript capture + the write→refresh loop (Phase
+4a/4b, #61/#66/#67) + post-voice-session processing as a standard execution
+(#102).** The orb renders the agent-produced graph, supports button-driven
+**scope mount/unmount → agent re-export → live rebuild**, and a **client-held
+voice tile** (browser connects directly to Gemini Live via a short-lived,
+config-locked ephemeral token minted by Trinity — no audio proxying). Voice
+transcripts save through the owner-gated `action` broker; the configured
+post-session prompt (#73) is dispatched by `services/brain_orb_postprocess.py`
+via `execute_task(triggered_by="voice")` — a real, observable execution row
+(sweep-safe, cost-tracked, failures surface as FAILED), replacing the hook's
+detached `claude -p` (#102). Still deferred: `run_skill` headless-skill
+injection. Mirrors the workspace page (gated per-agent route) and the
+agent-owned read-surface pattern (pipelines #919, reports #918): the agent owns
+generation + scope state (Invariant #8), Trinity reads/renders + brokers
+control. Default OFF — no impact on other agents. Full flow:
+[brain-orb.md](feature-flows/brain-orb.md).
+
+**Default Cornelius (trinity-enterprise#107):** a **fresh install** auto-seeds a
+default "Cornelius" second-brain agent from the bundled `local:cornelius` template
+(`services/cornelius_agent_service.py`) and existence-guarded-enables the
+`brain_orb_enabled` flag, so the orb renders out-of-the-box. First-run-only (durable
+`cornelius_seeded` system-setting flag — deleting Cornelius does not re-provision)
+and skipped when any non-system agent already exists (established fleets are never
+surprised); Redis SETNX lock (`cornelius:provision`) guards the `--workers 2` race.
+Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md).
 
 - **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
   page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/
@@ -841,9 +863,12 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 ### Webhook Triggers (WEBHOOK-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/webhooks/{webhook_token}` | Token (URL-embedded) | Trigger schedule execution; rate-limited 10/60s per token via `rate_limiter.py` (#1023); returns 202 |
+| POST | `/api/webhooks/{webhook_token}` | Token (URL-embedded) + optional HMAC | Trigger schedule execution; rate-limited 10/60s per token via `rate_limiter.py` (#1023); returns 202. When the schedule has signature auth on, an `X-Trinity-Signature: sha256=HMAC-SHA256(secret, raw_body)` header is required (fail-closed 401 on missing/invalid) (ent#77) |
+| POST/DELETE | `/api/agents/{name}/schedules/{id}/webhook/secret` | JWT (`AuthorizedAgent`) | Enable/rotate signature auth — mints the signing secret, returns it **exactly once** (`whsec_…`, then only the AES-256-GCM envelope is kept) / disable auth, URL stays live (ent#77) |
 
-Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_token` (partial unique index, O(1) lookup); re-POST rotates (old URL instantly invalid); DELETE nulls (subsequent triggers 404). Optional `{"context": "..."}` body (max 4000 chars) appended to the schedule message wrapped in a framing header to reduce prompt-injection surface. All triggers audit-logged with `triggered_by="webhook"`; auto-derives idempotency key `(token, body_hash)` (Invariant #18).
+Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_token` (partial unique index, O(1) lookup); re-POST rotates (old URL instantly invalid) and clears any signing secret; DELETE nulls (subsequent triggers 404). Optional `{"context": "..."}` body (max 4000 chars) appended to the schedule message wrapped in a framing header to reduce prompt-injection surface. All triggers audit-logged with `triggered_by="webhook"`; auto-derives idempotency key `(token, body_hash)` (Invariant #18).
+
+**Signature auth (ent#77):** optional per-schedule HMAC layer so a leaked URL alone can't trigger the schedule — off by default. `POST .../webhook/secret` mints a `whsec_` secret (returned once; stored only as an AES-256-GCM envelope, Invariant #12), sets `webhook_auth_enabled`. The public trigger verifies `X-Trinity-Signature = sha256=HMAC-SHA256(secret, raw_body)` (`services/webhook_signature.py`, constant-time) after the body is read + size-capped, **fail-closed** (401 on missing/invalid, 500 on an unreadable stored secret — never a silent bypass). Rotating the URL or revoking clears the secret. Mint/rotate/disable are `AuthorizedAgent` (aligns with schedule management). UI: the Schedules-tab per-schedule **Webhook** panel (enable/reveal/copy URL, example `curl`, rotate/revoke, enable/rotate/disable signing, secret shown once).
 
 **Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
 
@@ -1166,6 +1191,8 @@ CREATE TABLE agent_schedules (
     timeout_seconds INTEGER,                     -- #913: NULL = inherit agent cap
     webhook_token TEXT,                          -- WEBHOOK-001: 43-char urlsafe token, nullable
     webhook_enabled INTEGER DEFAULT 0,           -- WEBHOOK-001
+    webhook_secret_encrypted TEXT,               -- ent#77: AES-256-GCM HMAC signing secret (Invariant #12), nullable
+    webhook_auth_enabled INTEGER DEFAULT 0,      -- ent#77: gate signature verification in the public trigger
     deleted_at TEXT,                             -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id)
 );
