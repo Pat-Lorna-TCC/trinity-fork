@@ -10,7 +10,7 @@ Agents are created from templates or from scratch. Each agent runs as an isolate
 
 - **GitHub Template** -- A repository in `github:Org/repo` format. Supports branch selection with `github:Org/repo@branch`. Private repos require a GitHub PAT.
 - **Admin-Configured Templates** -- GitHub repos configured by an admin in Settings. Metadata (name, description, resources, MCP servers) is fetched from each repo's `template.yaml` via the GitHub API and cached for 10 minutes. These appear as cards on the Templates page (`/templates`).
-- **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory.
+- **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory and shown as a curated **Starter Templates** section on the Templates page. The recommended starters (`scout`, `sage`, `scribe`) are ordered first; internal test and demo fixtures (marked `hidden: true` in their `template.yaml`) are hidden from the list but stay creatable by id.
 - **From Scratch** -- Creates a minimal agent with a default `CLAUDE.md`.
 
 **Template structure** follows a standard layout:
