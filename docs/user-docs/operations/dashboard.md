@@ -8,6 +8,8 @@ The main Dashboard at `/` monitors all agents and their activities in real time.
 
 ### Grid View
 
+![Trinity Dashboard — Grid view showing the fleet as a canvas of agent tiles with activity sparklines, success rates, cost, and inline Run/Auto toggles](../images/dashboard-grid-view.png)
+
 A magnetic tile canvas — the fleet as a grid of agent cards rather than a graph or a timeline. Each agent is a five-zone tile showing its avatar, runtime badge, and inline **Running** and **Autonomy** toggles, plus live status chips (git sync health, pending operator-queue items).
 
 1. Drag a tile to move it; drop it onto another tile to **swap** positions. The layout snaps to an unbounded lattice and is saved per user.
