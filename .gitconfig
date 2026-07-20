@@ -1,0 +1,5 @@
+[user]
+	email = trinity@agent.local
+	name = Trinity
+[init]
+	defaultBranch = main
