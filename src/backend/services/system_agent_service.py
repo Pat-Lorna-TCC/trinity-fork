@@ -230,6 +230,10 @@ class SystemAgentService:
             'trinity.created': utc_now_iso(),
             'trinity.template': SYSTEM_AGENT_TEMPLATE,
             'trinity.is-system': 'true',  # Mark as system agent
+            # Not compose-managed — groups this container into the same
+            # Docker Desktop folder as regular agents (see crud.py).
+            'com.docker.compose.project': 'trinity-agents',
+            'com.docker.compose.service': SYSTEM_AGENT_NAME,
         }
 
         # Create the container with security settings

@@ -469,6 +469,14 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # Update label to reflect current setting
     labels["trinity.full-capabilities"] = str(full_capabilities).lower()
 
+    # Backfill labels added to fresh-creation paths (crud.py, system_agent_service.py)
+    # after this container was originally created. `labels` here is copied forward
+    # from the old container's own Config.Labels, so anything not already present
+    # would otherwise never appear on recreate — setdefault so it's added once and
+    # then simply carried forward on every subsequent recreate.
+    labels.setdefault('com.docker.compose.project', 'trinity-agents')
+    labels.setdefault('com.docker.compose.service', agent_name)
+
     # Stop and remove old container
     try:
         await container_stop(old_container)

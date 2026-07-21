@@ -939,7 +939,12 @@ async def create_agent_internal(
                     'trinity.template': config.template or '',
                     'trinity.agent-runtime': config.runtime or 'claude-code',
                     'trinity.full-capabilities': str(full_capabilities).lower(),
-                    'trinity.base-image-version': get_platform_version()
+                    'trinity.base-image-version': get_platform_version(),
+                    # Not compose-managed — this label only makes Docker Desktop
+                    # group agent containers into a folder, same as it does for
+                    # the docker-compose-managed trinity-* platform services.
+                    'com.docker.compose.project': 'trinity-agents',
+                    'com.docker.compose.service': config.name,
                 },
                 # Always apply AppArmor for additional sandboxing
                 security_opt=['apparmor:docker-default'],
